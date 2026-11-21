@@ -1,0 +1,233 @@
+// สร้างอัตโนมัติจาก tools/embed_web.py — อย่าแก้ไฟล์นี้ตรง ๆ
+#pragma once
+#include <pgmspace.h>
+static const char INDEX_HTML[] PROGMEM =
+R"NUIHTML(<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#000000">
+<title>NUI Smart Gauge</title>
+<style>
+html,body{margin:0;height:100%;background:#000;overflow:hidden;overscroll-behavior:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:#fff}
+#rot{position:fixed;left:0;top:0;width:100vw;height:100vh;height:100dvh}
+#rot.portrait{width:100vh;width:100dvh;height:100vw;transform-origin:0 0;transform:translateX(100vw) rotate(90deg)}
+#stage{position:absolute;inset:0;display:flex;align-items:center;justify-content:center}
+canvas{touch-action:none;background:#000;display:block}
+#msg{position:absolute;left:0;right:0;top:0;bottom:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(0,0,0,.78);text-align:center;padding:16px;font-size:16px;line-height:1.5;transition:opacity .25s}
+#msg.hide{opacity:0;pointer-events:none}
+#msg b{font-size:20px;color:#2fe}
+#msg small{opacity:.7;font-size:13px}
+#gear{position:absolute;right:calc(8px + env(safe-area-inset-right));top:calc(8px + env(safe-area-inset-top));width:40px;height:40px;border-radius:20px;border:1px solid #fff4;background:#0008;color:#fff;font-size:22px;line-height:38px;text-align:center;opacity:0;transition:opacity .3s;pointer-events:none}
+#gear.show{opacity:.85;pointer-events:auto}
+#set{position:absolute;right:calc(8px + env(safe-area-inset-right));top:calc(56px + env(safe-area-inset-top));width:min(300px,80%);background:#111e;border:1px solid #fff3;border-radius:10px;padding:10px 12px;font-size:14px;display:none}
+#set.open{display:block}
+#set label{display:flex;align-items:center;justify-content:space-between;margin:7px 0;gap:8px}
+#set input[type=text]{width:130px;background:#000;color:#fff;border:1px solid #fff4;border-radius:5px;padding:4px 6px;font-size:14px}
+#set button{background:#2a6;color:#fff;border:0;border-radius:6px;padding:6px 10px;font-size:14px}
+#gps{position:absolute;left:calc(8px + env(safe-area-inset-left));bottom:calc(6px + env(safe-area-inset-bottom));font-size:11px;opacity:.6}
+</style>
+</head>
+<body>
+<div id="rot"><div id="stage"><canvas id="c" width="320" height="240"></canvas></div>
+<div id="msg"><div><b>NUI SMART GAUGE</b></div><div id="mt">กำลังเชื่อมต่อ…</div><small id="ms"></small></div>
+<div id="gear">&#9881;</div>
+<div id="set">
+<label>IP เกจ <input type="text" id="ip" inputmode="decimal" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
+<label>GPS ส่งความเร็ว <input type="checkbox" id="gpsOn" checked></label>
+<label>ค้างหน้าจอไว้ <input type="checkbox" id="wake" checked></label>
+<label><span id="st"></span> <button id="fs">เต็มจอ</button></label>
+<label><span></span> <button id="ok">ตกลง</button></label>
+</div>
+<div id="gps"></div></div>
+<script>
+(function(){
+"use strict";
+var W=320,H=240;
+var cv=document.getElementById("c"),ctx=cv.getContext("2d",{alpha:false});
+var img=ctx.createImageData(W,H),fb=new Uint32Array(img.data.buffer);
+var dirty=true;
+for(var i=0;i<fb.length;i++)fb[i]=0xff000000;
+function ls(k,v){try{if(v===undefined)return localStorage.getItem(k);localStorage.setItem(k,v)}catch(e){return null}}
+// ---------- RGB565 -> ABGR (little-endian) ----------
+var LUT=new Uint32Array(65536);
+for(var v=0;v<65536;v++){var r=(v>>11)&31,g=(v>>5)&63,b=v&31;
+  r=(r<<3)|(r>>2);g=(g<<2)|(g>>4);b=(b<<3)|(b>>2);LUT[v]=(0xff000000|(b<<16)|(g<<8)|r)>>>0}
+// ---------- วาดคำสั่งจากเกจ ----------
+function fill(x,y,w,h,c){
+  if(x<0){w+=x;x=0}if(y<0){h+=y;y=0}if(x+w>W)w=W-x;if(y+h>H)h=H-y;
+  if(w<=0||h<=0)return;var p=LUT[c];
+  for(var j=y;j<y+h;j++){var o=j*W+x;fb.fill(p,o,o+w)}
+}
+function px(x,y,p){if(x>=0&&x<W&&y>=0&&y<H)fb[y*W+x]=p}
+function line(x0,y0,x1,y1,c){
+  var p=LUT[c],st=Math.abs(y1-y0)>Math.abs(x1-x0),t;
+  if(st){t=x0;x0=y0;y0=t;t=x1;x1=y1;y1=t}
+  if(x0>x1){t=x0;x0=x1;x1=t;t=y0;y0=y1;y1=t}
+  var dx=x1-x0,dy=Math.abs(y1-y0),err=dx>>1,ys=y0<y1?1:-1;
+  for(;x0<=x1;x0++){if(st)px(y0,x0,p);else px(x0,y0,p);err-=dy;if(err<0){y0+=ys;err+=dx}}
+}
+function apply(buf){
+  var d=new DataView(buf),n=buf.byteLength,i=0;
+  while(i<n){
+    var op=d.getUint8(i++);
+    if(op===1){fill(d.getUint16(i,true),d.getUint16(i+2,true),d.getUint16(i+4,true),d.getUint16(i+6,true),d.getUint16(i+8,true));i+=10}
+    else if(op===4){line(d.getInt16(i,true),d.getInt16(i+2,true),d.getInt16(i+4,true),d.getInt16(i+6,true),d.getUint16(i+8,true));i+=10}
+    else if(op===7){fb.fill(LUT[d.getUint16(i,true)]);i+=2}
+    else if(op===5||op===6){
+      var x=d.getInt16(i,true),y=d.getInt16(i+2,true),w=d.getUint16(i+4,true),h=d.getUint16(i+6,true);i+=8;
+      var tot=w*h,k=0;
+      if(op===5){for(;k<tot;k++){put(x,y,w,k,LUT[d.getUint16(i,true)]);i+=2}}
+      else{while(k<tot){var run=d.getUint8(i),c=LUT[d.getUint16(i+1,true)];i+=3;for(var q=0;q<run&&k<tot;q++,k++)put(x,y,w,k,c)}}
+    }else{return false}   // ไม่รู้จัก -> ทิ้งก้อนนี้
+  }
+  dirty=true;return true;
+}
+function put(x,y,w,k,p){var xx=x+(k%w),yy=y+((k/w)|0);if(xx>=0&&xx<W&&yy>=0&&yy<H)fb[yy*W+xx]=p}
+// ---------- แสดงผล ----------
+var rot=document.getElementById("rot"),dw=0,dh=0,scale=1;
+function layout(){
+  var portrait=window.innerHeight>window.innerWidth;
+  rot.className=portrait?"portrait":"";
+  var aw=portrait?window.innerHeight:window.innerWidth,ah=portrait?window.innerWidth:window.innerHeight;
+  var s=Math.min(aw/W,ah/H),dpr=window.devicePixelRatio||1;
+  if(s*dpr>=2)s=Math.floor(s*dpr)/dpr;         // ขยายเป็นจำนวนเต็ม -> พิกเซลคม
+  scale=s;
+  cv.style.width=(W*s)+"px";cv.style.height=(H*s)+"px";
+  var bw=Math.round(W*s*dpr),bh=Math.round(H*s*dpr);
+  if(cv.width!==bw||cv.height!==bh){cv.width=bw;cv.height=bh}
+  ctx=cv.getContext("2d",{alpha:false});dirty=true;
+}
+var off=document.createElement("canvas");off.width=W;off.height=H;var octx=off.getContext("2d",{alpha:false});
+function frame(){
+  if(dirty){dirty=false;octx.putImageData(img,0,0);
+    ctx.imageSmoothingEnabled=(cv.width%W!==0);ctx.imageSmoothingQuality="high";
+    ctx.drawImage(off,0,0,cv.width,cv.height)}
+  requestAnimationFrame(frame);
+}
+window.addEventListener("resize",layout);window.addEventListener("orientationchange",function(){setTimeout(layout,150)});
+// ---------- ข้อความสถานะ ----------
+var msg=document.getElementById("msg"),mt=document.getElementById("mt"),ms=document.getElementById("ms");
+function status(t,s,show){mt.textContent=t;ms.textContent=s||"";msg.className=show?"":"hide"}
+// ---------- เชื่อมต่อ ----------
+var ws=null,connected=false,retry=null,fails=0;
+function host(){
+  var h=ls("ip");if(h)return h;
+  var l=location.hostname;
+  if(/^https?:$/.test(location.protocol)&&l&&l!=="localhost"&&l!=="127.0.0.1")return l;
+  return "192.168.4.1";
+}
+function url(){return "ws://"+host()+":81/"}
+function connect(){
+  clearTimeout(retry);
+  if(ws){try{ws.onclose=ws.onerror=ws.onmessage=ws.onopen=null;ws.close()}catch(e){}}
+  status("กำลังเชื่อมต่อเกจ…","ต่อ Wi-Fi ชื่อ NUI-GAUGE (รหัส 12345678) ก่อน แล้วรอสักครู่",true);
+  try{ws=new WebSocket(url())}catch(e){retry=setTimeout(connect,1500);return}
+  ws.binaryType="arraybuffer";
+  ws.onopen=function(){fails=0};
+  ws.onmessage=function(e){
+    if(typeof e.data==="string"){
+      try{var o=JSON.parse(e.data);if(o.t==="hello"){connected=true;status("","",false);gpsKick()}}catch(x){}
+      return}
+    if(!connected)return;
+    apply(e.data);
+  };
+  ws.onclose=ws.onerror=function(){
+    if(ws){ws.onclose=ws.onerror=null}
+    connected=false;fails++;
+    status("หลุดการเชื่อมต่อ","ตรวจว่ามือถือยังต่อ Wi-Fi NUI-GAUGE อยู่ (ถ้ามีถามว่า 'ไม่มีอินเทอร์เน็ต' ให้เลือกคงการเชื่อมต่อไว้)",true);
+    retry=setTimeout(connect,1200);
+  };
+}
+function send(s){if(ws&&connected&&ws.readyState===1)ws.send(s)}
+// ---------- สัมผัส : แตะ / ปัด ----)NUIHTML"
+R"NUIHTML(------
+var tp=null;
+function pos(t){var r=cv.getBoundingClientRect(),portrait=rot.className==="portrait",x,y;
+  if(portrait){x=(t.clientY-r.top);y=(r.right-t.clientX)}else{x=t.clientX-r.left;y=t.clientY-r.top}
+  // portrait: หมุน 90° ตามเข็ม -> แกน x ของจอเกจ = แกน y ของหน้าจอ
+  if(portrait){var rr=cv.getBoundingClientRect();x=(t.clientY-rr.top);y=(rr.right-t.clientX)}
+  return {x:Math.max(0,Math.min(W-1,Math.round(x/scale))),y:Math.max(0,Math.min(H-1,Math.round(y/scale)))}}
+cv.addEventListener("pointerdown",function(e){e.preventDefault();showGear();if(tp)return;tp={id:e.pointerId,p:pos(e),t:Date.now()};try{cv.setPointerCapture(e.pointerId)}catch(x){}});
+cv.addEventListener("pointerup",function(e){
+  e.preventDefault();if(!tp||tp.id!==e.pointerId)return;
+  var q=pos(e),dx=q.x-tp.p.x,dy=q.y-tp.p.y,a=tp;tp=null;
+  if(Math.abs(dx)<10&&Math.abs(dy)<10)send("T "+a.p.x+" "+a.p.y);
+  else if(Math.abs(dx)>=24&&Math.abs(dx)>Math.abs(dy)*1.2)send("W "+dx+" "+dy+" "+a.p.x+" "+a.p.y);
+});
+cv.addEventListener("pointercancel",function(){tp=null});
+document.addEventListener("contextmenu",function(e){e.preventDefault()});
+document.addEventListener("gesturestart",function(e){e.preventDefault()});
+// ---------- ตั้งค่า ----------
+var gear=document.getElementById("gear"),set=document.getElementById("set"),gt=null;
+function showGear(){gear.className="show";clearTimeout(gt);gt=setTimeout(function(){if(!set.classList.contains("open"))gear.className=""},3500)}
+gear.addEventListener("click",function(){set.classList.toggle("open");showGear()});
+var ipE=document.getElementById("ip"),gpsE=document.getElementById("gpsOn"),wakeE=document.getElementById("wake");
+ipE.value=ls("ip")||"";ipE.placeholder="192.168.4.1";
+gpsE.checked=ls("gps")!=="0";wakeE.checked=ls("wake")!=="0";
+document.getElementById("ok").onclick=function(){
+  ls("ip",ipE.value.trim());ls("gps",gpsE.checked?"1":"0");ls("wake",wakeE.checked?"1":"0");
+  set.classList.remove("open");gpsKick();wakeKick();connect()};
+document.getElementById("fs").onclick=function(){var d=document.documentElement;try{(d.requestFullscreen||d.webkitRequestFullscreen).call(d)}catch(e){}};
+// ---------- GPS ----------
+var gpsLine=document.getElementById("gps"),stEl=document.getElementById("st"),watchId=null,last=null,lastSent=0,lastFix=0,prevPos=null;
+function kmhOf(c,t){
+  if(c.speed!=null&&!isNaN(c.speed)&&c.speed>=0)return c.speed*3.6;
+  if(prevPos&&t>prevPos.t){                       // เครื่องไม่ให้ speed -> คำนวณจากระยะทาง
+    var R=6371000,dLa=(c.latitude-prevPos.la)*Math.PI/180,dLo=(c.longitude-prevPos.lo)*Math.PI/180,la=c.latitude*Math.PI/180;
+    var a=Math.sin(dLa/2)*Math.sin(dLa/2)+Math.cos(la)*Math.cos(prevPos.la*Math.PI/180)*Math.sin(dLo/2)*Math.sin(dLo/2);
+    var m=2*R*Math.asin(Math.sqrt(a));return m/((t-prevPos.t)/1000)*3.6}
+  return null}
+function onFix(c,ts){
+  var k=kmhOf(c,ts);prevPos={la:c.latitude,lo:c.longitude,t:ts};
+  if(k==null)return;if(c.accuracy>80){return}
+  if(k<1.5)k=0;                                   // นิ่ง: กัน GPS สั่น
+  last=k;lastFix=Date.now();
+}
+function gpsStop(){
+  if(watchId!=null){var C=window.Capacitor&&window.Capacitor.Plugins&&window.Capacitor.Plugins.Geolocation;
+    try{if(C&&typeof watchId==="string")C.clearWatch({id:watchId});else navigator.geolocation.clearWatch(watchId)}catch(e){}}
+  watchId=null;last=null;prevPos=null;send("S -1")}
+function gpsKick(){
+  if(ls("gps")==="0"){gpsStop();gpsLine.textContent="GPS ปิด";stEl.textContent="";return}
+  if(watchId!=null)return;
+  var C=window.Capacitor&&window.Capacitor.Plugins&&window.Capacitor.Plugins.Geolocation;
+  if(C&&C.watchPosition){
+    C.requestPermissions().catch(function(){}).then(function(){
+      return C.watchPosition({enableHighAccuracy:true,timeout:15000,maximumAge:0},function(p,err){
+        if(err||!p){gpsLine.textContent="GPS: ไม่ได้รับสัญญาณ";return}
+        onFix(p.coords,p.timestamp||Date.now())})
+    }).then(function(id){watchId=id},function(e){gpsLine.textContent="GPS: ไม่ได้รับอนุญาต"});
+    watchId="pending";return}
+  if(!navigator.geolocation||!window.isSecureContext){
+    gpsLine.textContent="GPS ใช้ไม่ได้ในหน้าเว็บนี้ (ต้องใช้แอป NUI Gauge)";stEl.textContent="GPS: ต้องใช้แอป";return}
+  watchId=navigator.geolocation.watchPosition(function(p){onFix(p.coords,p.timestamp)},
+    function(e){gpsLine.textContent="GPS: "+(e.code===1?"ไม่ได้รับอนุญาต":"ไม่ได้รับสัญญาณ")},
+    {enableHighAccuracy:true,maximumAge:0,timeout:15000});
+}
+setInterval(function(){
+  if(!connected)return;
+  var now=Date.now();
+  if(watchId!=null&&last!=null&&now-lastFix<3000){send("S "+last.toFixed(1));gpsLine.textContent="GPS "+Math.round(last)+" km/h"}
+  else if(watchId!=null){send("S -1");if(ls("gps")!=="0")gpsLine.textContent="GPS: รอสัญญาณ…"}
+},1000);
+// ---------- ค้างหน้าจอ ----------
+var wl=null;
+function wakeKick(){
+  if(ls("wake")==="0"){if(wl){try{wl.release()}catch(e){}wl=null}return}
+  try{if(navigator.wakeLock&&!wl)navigator.wakeLock.request("screen").then(function(l){wl=l;l.addEventListener("release",function(){wl=null})}).catch(function(){})}catch(e){}
+}
+document.addEventListener("visibilitychange",function(){if(!document.hidden){wakeKick();if(!connected)connect();else send("R")}});
+// ---------- ทดสอบ ----------
+window.NUI={feed:function(b){return apply(b)},fb:fb,W:W,H:H,connect:connect,isConnected:function(){return connected},
+  hello:function(){connected=true;status("","",false)},sendHook:function(f){send=f},onFix:onFix,last:function(){return last}};
+layout();requestAnimationFrame(frame);
+if(!window.__NUI_NOCONNECT){connect();wakeKick();gpsKick()}
+})();
+</script>
+</body>
+</html>
+)NUIHTML";

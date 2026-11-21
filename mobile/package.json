@@ -1,0 +1,21 @@
+{
+  "name": "nui-gauge-app",
+  "version": "1.0.0",
+  "private": true,
+  "description": "NUI Smart Gauge - แอปมือถือ (Android / iOS) แสดงหน้าจอเกจ + ส่งความเร็วจาก GPS",
+  "scripts": {
+    "sync": "cap sync",
+    "patch": "python3 patch_native.py",
+    "android": "cap open android",
+    "ios": "cap open ios"
+  },
+  "dependencies": {
+    "@capacitor/android": "^6.1.2",
+    "@capacitor/core": "^6.1.2",
+    "@capacitor/geolocation": "^6.0.1",
+    "@capacitor/ios": "^6.1.2"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^6.1.2"
+  }
+}

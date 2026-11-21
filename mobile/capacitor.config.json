@@ -1,0 +1,13 @@
+{
+  "appId": "com.nui.gauge",
+  "appName": "NUI Gauge",
+  "webDir": "www",
+  "backgroundColor": "#000000",
+  "server": {
+    "androidScheme": "http",
+    "cleartext": true
+  },
+  "ios": {
+    "contentInset": "never"
+  }
+}

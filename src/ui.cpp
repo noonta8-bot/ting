@@ -1,0 +1,2085 @@
+#include "ui.h"
+#include "config.h"
+#include "map.h"
+#include "splash_logo.h"
+#include "splash_chang.h"
+#include "thai_font.h"
+#include "race_font.h"
+#if HOME_USE_BG
+#include "home_bg.h"
+#include "num_font.h"
+#endif
+#include "mobile.h"
+#include <Preferences.h>
+#include <math.h>
+
+// ============================================================
+//  Dark Racing UI  -  320x240 landscape
+//  หน้า: HOME / MAP GRID / PLOT / DATA / DTC / SYS / MENU   (NUI ssk Remap)
+// ============================================================
+
+MirrorTFT tft;
+static Preferences prefs;
+
+// ---------------- สี ----------------
+constexpr uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b) {
+  return (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+}
+constexpr uint16_t C_BG    = 0x0000;
+constexpr uint16_t C_PANEL = rgb565(20, 25, 36);
+constexpr uint16_t C_EDGE  = rgb565(70, 82, 104);
+constexpr uint16_t C_GRID  = rgb565(34, 40, 52);
+constexpr uint16_t C_TXT   = rgb565(245, 248, 255);
+constexpr uint16_t C_DIM   = rgb565(165, 176, 196);
+constexpr uint16_t C_CYAN  = rgb565(2, 240, 253);
+constexpr uint16_t C_GREEN = rgb565(42, 249, 51);
+constexpr uint16_t C_YEL   = rgb565(253, 238, 3);
+constexpr uint16_t C_ORG   = rgb565(254, 144, 2);
+constexpr uint16_t C_RED   = rgb565(252, 10, 32);
+constexpr uint16_t C_BLUE  = rgb565(0, 163, 252);
+constexpr uint16_t C_PURP  = rgb565(199, 26, 249);
+constexpr uint16_t C_MAG   = rgb565(250, 14, 252);
+
+static uint16_t lerpc(uint16_t a, uint16_t b, float t) {
+  if (t < 0) t = 0; if (t > 1) t = 1;
+  int ar = (a >> 11) & 31, ag = (a >> 5) & 63, ab = a & 31;
+  int br = (b >> 11) & 31, bg = (b >> 5) & 63, bb = b & 31;
+  return (uint16_t)(((int)(ar + (br - ar) * t) << 11) | ((int)(ag + (bg - ag) * t) << 5) | (int)(ab + (bb - ab) * t));
+}
+static inline uint16_t dimc(uint16_t c, uint8_t n) { while (n--) c = (c & 0xF7DE) >> 1; return c; }
+
+// ---------------- layout ----------------
+constexpr int TOP_H = 22;
+constexpr int NAV_Y = 212;
+constexpr int CT = TOP_H;            // content top
+constexpr int CH = NAV_Y - TOP_H;    // content height = 190
+constexpr int NPAGES = 9;      // รวมหน้า MENU, หน้าตั้งค่าแจ้งเตือน และหน้าเชื่อมมือถือ
+constexpr int NAVN = 6;        // หน้าที่อยู่ในแถบเมนูล่างและวงปัด (ไม่รวม MENU)
+enum { P_HOME = 0, P_GRID, P_PLOT, P_DATA, P_DTC, P_SYS, P_MENU, P_ALERT, P_PHONE };
+static const char* PAGE_NAMES[NPAGES] = {"HOME", "GRID", "PLOT", "DATA", "DTC", "SYS", "MENU", "ALERT", "PHONE"};
+static void gotoPage(int p);
+
+// ---------------- สถานะเครื่อง -> สี ----------------
+static uint16_t colEot(float c) {
+  if (c < EOT_COLD) return c < 40 ? C_BLUE : C_CYAN;
+  if (c <= EOT_HOT) return C_GREEN;
+  if (c <= EOT_CRIT) return C_YEL;
+  return C_RED;
+}
+static uint16_t colBatt(float v) {
+  if (v < 1.0f) return C_DIM;
+  if (v < BATT_LOW) return C_RED;
+  if (v < BATT_WARN_LOW) return C_ORG;
+  if (v <= BATT_HIGH) return C_GREEN;
+  return C_RED;
+}
+static uint16_t colAfr(float a) {
+  if (a < 1.0f) return C_DIM;
+  if (a < 12.0f) return C_RED;
+  if (a < 13.5f) return C_ORG;
+  if (a <= 15.5f) return C_GREEN;
+  if (a <= 17.0f) return C_YEL;
+  return C_ORG;
+}
+static uint16_t colRpm(float r) {
+  if (r >= RPM_REDLINE) return C_RED;
+  if (r >= RPM_WARN) return C_ORG;
+  return C_TXT;
+}
+
+
+// ============================================================
+//  ภาษา EN / TH  : แปลข้อความตอนวาด (txt) ด้วยตารางคำแปล + ฟอนต์ไทยบิตแมป (thai_font.h)
+//  ข้อความที่ไม่มีในตาราง (เช่น RPM, TPS, AFR) จะแสดงเป็นอังกฤษตามเดิม
+// ============================================================
+static uint8_t g_lang = 0;                 // 0 = EN, 1 = TH
+static void savePrefs();
+static void langApply();
+
+struct ThTr { const char* en; const char* th; };
+static const ThTr TH_TR[] = {
+  {"HOME", "หน้าหลัก"}, {"MAP GRID", "กริดแมพ"}, {"PLOT", "กราฟ"}, {"DATA", "ข้อมูล"},
+  {"SYS", "ระบบ"}, {"MENU", "เมนู"}, {"BACK", "กลับ"}, {"< BACK", "< กลับ"},
+  {"SMART GAUGE", "เกจอัจฉริยะ"}, {"GAUGE", "เกจอัจฉริยะ"}, {"SPEED", "ความเร็ว"},
+  {"DEMO MODE", "โหมดทดลอง"}, {"DEMO", "ทดลอง"}, {"ONLINE", "ออนไลน์"}, {"CONNECT", "กำลังต่อ"},
+  {"CONNECTING", "กำลังเชื่อมต่อ"}, {"CONNECTING...", "กำลังเชื่อมต่อ..."},
+  {"ECU CONNECTED", "ECU เชื่อมต่อแล้ว"}, {"ECU OFFLINE", "ECU ออฟไลน์"},
+  {"OFF", "ปิด"}, {"ON", "เปิด"}, {"DISABLED", "ปิดใช้งาน"},
+  {"NO ECU", "ไม่ต่อ"}, {"READY", "พร้อม"}, {"WAIT", "รอ"},
+  {"REC", "บันทึก"}, {"REC  ON", "บันทึก: เปิด"}, {"SAVE", "เซฟ"}, {"CLEAR", "ล้าง"},
+  {"SURE?", "แน่ใจ?"}, {"CONFIRM?", "ยืนยัน?"},
+  {"LIVE ON", "ตามสด: เปิด"}, {"LIVE OFF", "ตามสด: ปิด"},
+  {"RECORDING AFR / INJ / IGT", "กำลังบันทึก AFR / INJ / IGT"},
+  {"REC OFF - SAVED", "หยุดบันทึก - เซฟแล้ว"}, {"REC OFF - SAVE FAILED", "หยุดบันทึก - เซฟไม่สำเร็จ"},
+  {"MAP CLEARED", "ล้างแมพแล้ว"}, {"SAVING...", "กำลังเซฟ..."}, {"SAVE FAILED", "เซฟไม่สำเร็จ"},
+  {"CSV -> SERIAL 115200", "ส่ง CSV ออก Serial 115200"}, {"CSV SENT", "ส่ง CSV แล้ว"},
+  {"NO MEMORY FOR GRAPH", "หน่วยความจำไม่พอสำหรับกราฟ"},
+  {"MODE", "โหมด"}, {"GEAR", "เกียร์"}, {"NEUTRAL", "เกียร์ว่าง"}, {"IN GEAR", "ติดเกียร์"},
+  {"STATUS", "สถานะ"}, {"ECU ID", "รหัส ECU"}, {"FLASH COUNT", "จำนวนแฟลช"}, {"UPDATE RATE", "อัตราอัปเดต"},
+  {"ERRORS", "ข้อผิดพลาด"}, {"FREE HEAP", "หน่วยความจำว่าง"}, {"UPTIME", "เวลาเปิดเครื่อง"}, {"LIGHT", "สว่าง"},
+  {"DEMO: ON", "ทดลอง: เปิด"}, {"DEMO: OFF", "ทดลอง: ปิด"}, {"RECONNECT", "ต่อใหม่"},
+  {"ECU: ON", "ECU: เปิด"}, {"ECU: OFF", "ECU: ปิด"},
+  {"CURRENT", "ปัจจุบัน"}, {"HISTORY", "ประวัติ"}, {"READ", "อ่านรหัส"}, {"RESET ECU", "รีเซ็ต ECU"},
+  {"PRESS READ", "กดอ่านรหัส"}, {"NO CODES", "ไม่มีรหัสเสีย"},
+  {"Reading codes...", "กำลังอ่านรหัส..."}, {"Read failed (no ECU reply)", "อ่านไม่สำเร็จ (ECU ไม่ตอบ)"},
+  {"Clearing codes...", "กำลังลบรหัส..."}, {"Codes cleared OK", "ลบรหัสสำเร็จ"}, {"Clear failed", "ลบไม่สำเร็จ"},
+  {"Resetting ECU...", "กำลังรีเซ็ต ECU..."}, {"ECU reset OK", "รีเซ็ต ECU สำเร็จ"}, {"Reset failed", "รีเซ็ตไม่สำเร็จ"},
+  {"ECU not connected", "ยังไม่ได้ต่อ ECU"},
+  {"ALERT SETTINGS", "ตั้งค่าแจ้งเตือน"}, {"HIGH TEMP ALERT (C)", "แจ้งเตือนเครื่องร้อน (C)"},
+  {"SHIFT ALERT (RPM)", "แจ้งเตือนเปลี่ยนเกียร์ (รอบ)"}, {"HIGH TEMP", "เครื่องร้อน!"}, {"SHIFT UP!", "เปลี่ยนเกียร์!"},
+  {"HOT!", "ร้อน!"}, {"SHIFT!", "เปลี่ยน!"},
+  {"PHONE LINK", "เชื่อมมือถือ"}, {"WI-FI", "ไวไฟ"}, {"NAME", "ชื่อ"}, {"PASS", "รหัส"}, {"OPEN", "เปิดที่"},
+  {"PHONES", "มือถือที่ต่อ"}, {"GPS SPEED", "ความเร็ว GPS"}, {"AUTO", "อัตโนมัติ"}, {"PHONE", "มือถือ"},
+};
+// แปลทีละคำ (สำหรับข้อความที่มีตัวเลขปนอยู่ เช่น "CEL 0/15914", "SAVED 120 PTS")
+static const ThTr TH_WORDS[] = {
+  {"CEL", "ช่อง"}, {"PTS", "จุด"}, {"STEP", "ระยะ"}, {"SAVED", "เซฟแล้ว"}, {"ZOOM", "ซูม"},
+  {"Read", "อ่าน"}, {"OK:", "สำเร็จ:"}, {"now", "ปัจจุบัน"}, {"history", "ประวัติ"},
+};
+static const char* PAGE_NAMES_TH[NPAGES]  = {"หลัก", "กริด", "กราฟ", "ข้อมูล", "DTC", "ระบบ", "เมนู", "แจ้งเตือน", "มือถือ"};            // แถบเมนูล่าง (ช่องแคบ)
+static const char* PAGE_TITLES_TH[NPAGES] = {"หน้าหลัก", "กริดแมพ", "กราฟ", "ข้อมูล", "รหัสเสีย (DTC)", "ระบบ", "เมนู", "ตั้งค่าแจ้งเตือน", "เชื่อมมือถือ"};   // หัวเรื่อง
+
+static bool thHasNonAscii(const char* s) { for (; *s; s++) if ((uint8_t)*s >= 0x80) return true; return false; }
+
+// true = out มีข้อความไทย (แปลแล้ว หรือ ต้นฉบับเป็นไทยอยู่แล้ว)
+static bool thTranslate(const char* s, char* out, size_t n) {
+  if (thHasNonAscii(s)) { strncpy(out, s, n - 1); out[n - 1] = 0; return true; }
+  for (const ThTr& t : TH_TR) if (!strcmp(s, t.en)) { strncpy(out, t.th, n - 1); out[n - 1] = 0; return true; }
+  bool any = false; size_t o = 0; const char* p = s;
+  while (*p && o + 1 < n) {
+    if (*p == ' ') { out[o++] = ' '; p++; continue; }
+    const char* q = p; while (*q && *q != ' ') q++;
+    size_t len = (size_t)(q - p); const char* r = nullptr;
+    for (const ThTr& t : TH_WORDS) if (strlen(t.en) == len && !strncmp(p, t.en, len)) { r = t.th; break; }
+    if (r) { any = true; for (const char* c = r; *c && o + 1 < n; c++) out[o++] = *c; }
+    else   { for (const char* c = p; c < q && o + 1 < n; c++) out[o++] = *c; }
+    p = q;
+  }
+  out[o] = 0;
+  return any;
+}
+
+static uint32_t thNext(const char*& p) {          // UTF-8 -> code point
+  uint8_t c = (uint8_t)*p++;
+  if (c < 0x80) return c;
+  if ((c & 0xE0) == 0xC0 && *p) { uint32_t u = (c & 0x1F) << 6; u |= (uint8_t)*p++ & 0x3F; return u; }
+  if ((c & 0xF0) == 0xE0 && p[0] && p[1]) { uint32_t u = (c & 0x0F) << 12; u |= ((uint8_t)*p++ & 0x3F) << 6; u |= (uint8_t)*p++ & 0x3F; return u; }
+  return '?';
+}
+static bool thGlyphOf(const ThFont& f, uint32_t cp, ThGlyph& g) {
+  int i;
+  if (cp >= 0x20 && cp <= 0x7E) i = (int)cp - 0x20;
+  else if (cp >= 0x0E01 && cp <= 0x0E5B) i = 95 + (int)cp - 0x0E01;
+  else return false;
+  memcpy_P(&g, &f.g[i], sizeof(ThGlyph));
+  return true;
+}
+// ดึงกลิฟ: อังกฤษ/ตัวเลข (ASCII) ใช้ฟอนต์สปอร์ต RF_*  /  ภาษาไทยใช้ฟอนต์ไทยเดิม TH_*
+static bool glyphAny(const ThFont& tf, const ThFont& rf, uint32_t cp, ThGlyph& g, const uint8_t*& bmp) {
+  if (cp >= 0x20 && cp <= 0x7E) { memcpy_P(&g, &rf.g[cp - 0x20], sizeof(ThGlyph)); bmp = rf.bmp; return true; }
+  if (thGlyphOf(tf, cp, g)) { bmp = tf.bmp; return true; }
+  return false;
+}
+static inline bool thAboveVowel(uint32_t c) { return c == 0x0E31 || (c >= 0x0E34 && c <= 0x0E37) || c == 0x0E47 || c == 0x0E33; }
+static inline bool thTone(uint32_t c) { return c >= 0x0E48 && c <= 0x0E4B; }
+
+static int thWidth(const ThFont& tf, const ThFont& rf, const char* s) {
+  int w = 0; ThGlyph g; const uint8_t* bm;
+  while (*s) { uint32_t cp = thNext(s); if (glyphAny(tf, rf, cp, g, bm)) w += g.adv; }
+  return w;
+}
+// ถ้าตั้งไว้ (หน้า HOME) พื้นหลังของข้อความจะดึงจากภาพพื้นหลังแทนสีทึบ
+static void (*g_bgHook)(int x, int y, int w, int h, uint16_t* buf) = nullptr;
+// วาดข้อความ (อังกฤษ/ตัวเลข = ฟอนต์สปอร์ต, ไทย = ฟอนต์ไทยเดิม) ประกอบลงบัฟเฟอร์แล้วส่งทีเดียว (ไม่กระพริบ)
+static void thDraw(int x, int y, const char* s, uint8_t font, uint16_t fg, uint16_t bg, uint8_t datum, int pad) {
+  const ThFont& tf = font <= 1 ? TH_S : (font >= 4 ? TH_L : TH_M);
+  const ThFont& rf = font <= 1 ? RF_S : (font >= 4 ? RF_L : RF_M);
+  const bool hasTh = thHasNonAscii(s);
+  ThGlyph g; const uint8_t* bm;
+  thGlyphOf(tf, 0x0E01, g);
+  const int thCap = g.h, thLow = tf.desc, raise = font <= 1 ? 2 : (font >= 4 ? 4 : 3);
+  thGlyphOf(rf, 'H', g);
+  const int rfCap = g.h, topPad = font <= 1 ? 0 : (font >= 4 ? 4 : 3);
+  const int capH = hasTh ? thCap : rfCap;
+  int w = thWidth(tf, rf, s), W = max(w, pad);
+  int col = datum % 3, row = datum / 3; if (datum > 8) { col = 0; row = 0; }
+  int lowD = hasTh ? thLow : 0;
+  int base = row == 0 ? y + (hasTh ? thCap + 2 : topPad + rfCap) : (row == 1 ? y + (capH + 1) / 2 : y - lowD);
+  int xBox = col == 0 ? x : (col == 1 ? x - W / 2 : x - W);
+  int xTxt = col == 0 ? x : (col == 1 ? x - w / 2 : x - w);
+
+  // ขอบเขตหมึกจริงของข้อความนี้ (กันล้างทับเส้น/กรอบที่อยู่ติดกัน)
+  int inkT = base - (hasTh ? thCap : rfCap), inkB = base;   // กล่องล้างพื้นหลังพอดีกับตัวอักษรจริง (ไม่ทับบรรทัด/ปุ่มข้างเคียง)
+  { const char* q = s; uint32_t prev = 0;
+    while (*q) {
+      uint32_t cp = thNext(q);
+      if (!glyphAny(tf, rf, cp, g, bm) || !g.w) { prev = cp; continue; }
+      int gy = base + g.yo;
+      if (cp >= 0x0E00 && thTone(cp) && thAboveVowel(prev)) gy -= raise;
+      inkT = min(inkT, gy); inkB = max(inkB, gy + g.h);
+      prev = cp;
+    } }
+  int top = inkT - 1, bot = inkB + 1, H = bot - top;
+  if (W <= 0 || H <= 0) return;
+
+  uint16_t* buf = (uint16_t*)malloc((size_t)W * H * sizeof(uint16_t));
+  if (!buf) tft.fillRect(xBox, top, W, H, bg);
+  else if (g_bgHook) g_bgHook(xBox, top, W, H, buf);
+  else for (size_t i = 0, n = (size_t)W * H; i < n; i++) buf[i] = bg;
+
+  int cx = xTxt; uint32_t prev = 0;
+  while (*s) {
+    uint32_t cp = thNext(s);
+    if (!glyphAny(tf, rf, cp, g, bm)) continue;
+    if (g.w) {
+      int gy = base + g.yo;
+      if (cp >= 0x0E00 && thTone(cp) && thAboveVowel(prev)) gy -= raise;   // วรรณยุกต์ซ้อนบนสระ
+      if (buf) {
+        const int nb = (g.w + 7) / 8;
+        for (int j = 0; j < g.h; j++) {
+          int py = gy + j - top; if (py < 0 || py >= H) continue;
+          for (int i = 0; i < g.w; i++) {
+            if (!(pgm_read_byte(bm + g.off + j * nb + (i >> 3)) & (0x80 >> (i & 7)))) continue;
+            int px = cx + g.xo + i - xBox; if (px < 0 || px >= W) continue;
+            buf[(size_t)py * W + px] = fg;
+          }
+        }
+      } else tft.drawBitmap(cx + g.xo, gy, bm + g.off, g.w, g.h, fg);
+    }
+    cx += g.adv; prev = cp;
+  }
+  if (buf) {
+    tft.setSwapBytes(true);
+    tft.pushImage(xBox, top, W, H, buf);
+    tft.setSwapBytes(false);
+    free(buf);
+  }
+}
+static const char* pageName(int i)  { return g_lang ? PAGE_NAMES_TH[i]  : PAGE_NAMES[i]; }
+static const char* pageTitle(int i) { return g_lang ? PAGE_TITLES_TH[i] : PAGE_NAMES[i]; }
+
+// ---------------- helper วาดข้อความ ----------------
+static void txt(int x, int y, const char* s, uint8_t font, uint16_t fg, uint16_t bg,
+                uint8_t datum, int pad = 0, uint8_t size = 1) {
+  if (size == 1) {                                   // ข้อความปกติ: ฟอนต์สปอร์ต (อังกฤษ/ตัวเลข) + ฟอนต์ไทยเดิม
+    if (g_lang) {
+      char tb[96];
+      if (thTranslate(s, tb, sizeof tb)) { thDraw(x, y, tb, font, fg, bg, datum, pad); return; }
+    }
+    thDraw(x, y, s, font, fg, bg, datum, pad);
+    return;
+  }
+  tft.setTextSize(size);
+  tft.setTextDatum(datum);
+  tft.setTextPadding(pad);
+  tft.setTextColor(fg, bg);
+  tft.drawString(s, x, y, font);
+  tft.setTextPadding(0);
+  tft.setTextSize(1);
+}
+
+// ช่องข้อความที่วาดใหม่เฉพาะตอนค่าเปลี่ยน (ลดการกระพริบ + ลดโหลด SPI)
+struct Field {
+  int x = 0, y = 0, pad = 0;
+  uint8_t font = 2, datum = TL_DATUM, size = 1;
+  uint16_t bg = C_BG, lastFg = 0;
+  char last[48] = {0};
+  bool valid = false;
+  void set(int x_, int y_, int pad_, uint8_t font_, uint8_t datum_, uint16_t bg_ = C_BG, uint8_t size_ = 1) {
+    x = x_; y = y_; pad = pad_; font = font_; datum = datum_; bg = bg_; size = size_; valid = false;
+  }
+  void reset() { valid = false; }
+  void draw(const char* s, uint16_t fg) {
+    if (valid && fg == lastFg && strcmp(s, last) == 0) return;
+    strncpy(last, s, sizeof(last) - 1); last[sizeof(last) - 1] = 0;
+    lastFg = fg; valid = true;
+    txt(x, y, s, font, fg, bg, datum, pad, size);
+  }
+};
+
+static void button(int x, int y, int w, int h, const char* label, uint16_t fg, uint16_t fill, uint16_t edge) {
+  tft.fillRoundRect(x, y, w, h, 5, fill);
+  tft.drawRoundRect(x, y, w, h, 5, edge);
+  txt(x + w / 2, y + h / 2 + 1, label, 2, fg, fill, MC_DATUM);
+}
+static bool hit(int px, int py, int x, int y, int w, int h) {
+  return px >= x && px < x + w && py >= y && py < y + h;
+}
+// ปุ่มสลับภาษา EN | TH  (ครึ่งซ้าย = EN, ครึ่งขวา = TH ; ภาษาที่ใช้อยู่ไฮไลต์สีฟ้า)
+static void langButton(int x, int y, int w, int h) {
+  int hw = w / 2;
+  for (int i = 0; i < 2; i++) {
+    bool sel = (i == g_lang); int xx = x + i * hw;
+    uint16_t fill = sel ? C_CYAN : C_PANEL;
+    tft.fillRect(xx, y, hw, h, fill);
+    tft.drawRect(xx, y, hw, h, C_EDGE);
+    txt(xx + hw / 2, y + h / 2 + 1, i ? "TH" : "EN", 2, sel ? C_BG : C_TXT, fill, MC_DATUM);
+  }
+}
+static bool langTap(int px, int py, int x, int y, int w, int h) {
+  if (!hit(px, py, x, y, w, h)) return false;
+  uint8_t nl = (px < x + w / 2) ? 0 : 1;
+  if (nl != g_lang) { g_lang = nl; langApply(); }
+  return true;
+}
+
+// ---------------- Segmented arc (อัปเดตเฉพาะส่วนที่เปลี่ยน) ----------------
+typedef uint16_t (*ColorFn)(float frac);
+
+struct SegArc {
+  int cx = 0, cy = 0, r0 = 0, r1 = 0, n = 0;
+  float a0 = 0, sweep = 0;
+  ColorFn fn = nullptr;
+  bool tip = false;                 // true = เซกเมนต์ปลายสุดที่ติดเป็นสีขาว (เข็ม)
+  uint8_t lit[64];
+  void init(int cx_, int cy_, int r0_, int r1_, float a0_, float sweep_, int n_, ColorFn f) {
+    cx = cx_; cy = cy_; r0 = r0_; r1 = r1_; a0 = a0_; sweep = sweep_; n = n_ > 64 ? 64 : n_; fn = f;
+    invalidate();
+  }
+  void invalidate() { memset(lit, 255, sizeof lit); }
+  static void pt(float cx, float cy, float r, float deg, int& x, int& y) {
+    float a = deg * (float)DEG_TO_RAD;
+    x = (int)lroundf(cx + r * sinf(a));
+    y = (int)lroundf(cy - r * cosf(a));
+  }
+  void drawSeg(int i, uint8_t st) {
+    float step = sweep / n;
+    float ga = step > 3.0f ? 0.7f : 0.35f;                 // ช่องว่างระหว่างเซกเมนต์
+    float s = a0 + i * step + ga, e = a0 + (i + 1) * step - ga;
+    int x0, y0, x1, y1, x2, y2, x3, y3;
+    pt(cx, cy, r0, s, x0, y0); pt(cx, cy, r1, s, x1, y1);
+    pt(cx, cy, r0, e, x2, y2); pt(cx, cy, r1, e, x3, y3);
+    uint16_t zc = fn ? fn((i + 0.5f) / n) : C_CYAN;
+    uint16_t c = st == 2 ? 0xFFFF : (st == 1 ? zc : dimc(zc, 3));
+    tft.fillTriangle(x0, y0, x1, y1, x3, y3, c);
+    tft.fillTriangle(x0, y0, x3, y3, x2, y2, c);
+  }
+  void set(float f) {
+    if (f < 0) f = 0; if (f > 1) f = 1;
+    int k = (int)floorf(f * n + 0.5f);
+    for (int i = 0; i < n; i++) {
+      uint8_t want = i < k ? 1 : 0;
+      if (tip && k > 0 && i == k - 1) want = 2;
+      if (lit[i] != want) { drawSeg(i, want); lit[i] = want; }
+    }
+  }
+};
+
+// ---------------- สถานะรวม ----------------
+static EcuData D;
+static EcuState ST = ECU_OFF;
+static float sRpm = 0, sTps = 0, sEot = 0, sBatt = 0, sAfr = 0;
+static uint8_t g_bri = 200;
+static int g_page = 0;
+static uint8_t curDtcCount = 0;
+static bool g_mapRec = true;            // กำลังบันทึกตาราง MAP อยู่หรือไม่ (ทำงานทุกหน้า)
+
+// ---- แจ้งเตือน (ตั้งค่าได้จากหน้า SYS > ALERT SETTINGS) ----
+constexpr int TEMP_ALERT_MIN = 60, TEMP_ALERT_MAX = 150;          // องศา C
+constexpr int SHIFT_ALERT_MIN = 3000, SHIFT_ALERT_MAX = 12000;     // รอบ/นาที
+static bool     g_tempOn  = true;
+static uint8_t  g_tempC   = 110;       // เตือนเมื่ออุณหภูมิเครื่องยนต์ >= ค่านี้
+static bool     g_shiftOn = true;
+static uint16_t g_shiftRpm = 9000;     // เตือนเปลี่ยนเกียร์เมื่อรอบ >= ค่านี้
+static uint8_t  g_spdSrc = 0;                            // แหล่งความเร็ว: 0 = AUTO (GPS มือถือถ้ามี) 1 = ECU 2 = GPS มือถือเท่านั้น
+static bool     g_spdPhone = false;                      // ความเร็วที่แสดงอยู่มาจาก GPS มือถือ
+static bool     g_tempAct = false, g_shiftAct = false;   // สถานะเตือนขณะนี้ (มี hysteresis กันกระพริบ)
+
+// ---------------- ประวัติสำหรับกราฟ ----------------
+constexpr int HN = 300;
+constexpr int HCH = 5;
+static uint8_t hist[HCH][HN];
+static int histHead = 0;
+static uint32_t histT = 0;
+static const uint16_t CH_COL[HCH] = {C_CYAN, C_YEL, C_GREEN, C_ORG, C_MAG};
+static const char* CH_NAME[HCH] = {"RPM", "TPS", "AFR", "SPARK", "INJ%"};
+static bool chOn[HCH] = {true, true, true, false, false};
+
+static uint8_t u8n(float f) { if (f < 0) f = 0; if (f > 1) f = 1; return (uint8_t)(f * 255.0f); }
+static void histPush() {
+  hist[0][histHead] = u8n(D.rpm / RPM_MAX);
+  hist[1][histHead] = u8n(D.tps100 / 100.0f);
+  hist[2][histHead] = u8n((D.afr - 10.0f) / 10.0f);
+  hist[3][histHead] = u8n((D.spark + 10.0f) / 50.0f);
+  hist[4][histHead] = u8n(D.injDuty / 60.0f);
+  histHead = (histHead + 1) % HN;
+}
+
+// ---------------- Backlight ----------------
+static void setBrightness(uint8_t v) { g_bri = v; ledcWrite(0, v); }
+
+// ============================================================
+//  TOP BAR / NAV BAR
+// ============================================================
+static Field fTopState, fTopBatt, fTopDtc, fTopRec;
+static uint16_t lastDot = 0;
+
+static void topStatic() {
+  tft.fillRect(0, 0, SCREEN_W, TOP_H, C_BG);
+  for (int x = 0; x < SCREEN_W; x++) tft.drawPixel(x, TOP_H - 1, dimc(lerpc(C_CYAN, C_PURP, x / (float)SCREEN_W), 1));
+  for (int x = 0; x < SCREEN_W; x++) tft.drawPixel(x, TOP_H - 2, dimc(lerpc(C_CYAN, C_PURP, x / (float)SCREEN_W), 3));
+  txt(150, 11, pageTitle(g_page), 2, C_TXT, C_BG, MC_DATUM);
+  fTopState.set(20, 11, 70, 2, ML_DATUM);
+  fTopDtc.set(238, 11, 64, 2, MC_DATUM);
+  fTopBatt.set(316, 11, 56, 2, MR_DATUM);
+  fTopRec.set(104, 11, 44, 2, MC_DATUM); fTopRec.reset();
+  fTopState.reset(); fTopDtc.reset(); fTopBatt.reset(); lastDot = 0;
+}
+
+static void topUpdate(uint32_t now) {
+  const char* s = "OFF"; uint16_t c = C_DIM;
+  switch (ST) {
+    case ECU_ONLINE:     s = "ONLINE";  c = (curDtcCount > 0 || D.eotC >= EOT_CRIT || g_tempAct) ? C_RED : C_GREEN; break;
+    case ECU_CONNECTING: s = "CONNECT"; c = ((now / 400) & 1) ? C_YEL : dimc(C_YEL, 2); break;
+    case ECU_DEMO:       s = "DEMO";    c = C_PURP; break;
+    default: break;
+  }
+  if (c != lastDot) { tft.fillCircle(10, 11, 5, c); lastDot = c; }
+  fTopState.draw(s, c);
+  if (g_mapRec) fTopRec.draw(((now / 500) & 1) ? "REC" : "rec", C_RED); else fTopRec.draw("", C_BG);
+  char b[16];
+  if (g_tempAct || g_shiftAct) {                         // แจ้งเตือนทุกหน้าที่มีแถบบน (กระพริบ)
+    bool on = (now / 250) & 1;
+    if (!on) fTopDtc.draw("", C_BG);
+    else if (g_tempAct) fTopDtc.draw("HOT!", C_RED);
+    else fTopDtc.draw("SHIFT!", C_YEL);
+  }
+  else if (curDtcCount > 0) { snprintf(b, sizeof b, "DTC %u", curDtcCount); fTopDtc.draw(b, C_RED); }
+  else fTopDtc.draw("", C_BG);
+  if (ST == ECU_ONLINE || ST == ECU_DEMO) { snprintf(b, sizeof b, "%.1fV", sBatt); fTopBatt.draw(b, colBatt(sBatt)); }
+  else fTopBatt.draw("--.-V", C_DIM);
+}
+
+static void navDraw() {
+  tft.fillRect(0, NAV_Y, SCREEN_W, SCREEN_H - NAV_Y, C_PANEL);
+  tft.drawFastHLine(0, NAV_Y, SCREEN_W, C_EDGE);
+  for (int i = 0; i < NAVN; i++) {
+    int x0 = i * SCREEN_W / NAVN, x1 = (i + 1) * SCREEN_W / NAVN;
+    bool sel = (i == g_page);
+    if (sel) {
+      tft.fillRect(x0 + 1, NAV_Y + 1, x1 - x0 - 2, SCREEN_H - NAV_Y - 1, dimc(C_CYAN, 3));
+      tft.fillRect(x0 + 1, NAV_Y + 1, x1 - x0 - 2, 3, C_CYAN);
+    }
+    txt((x0 + x1) / 2, NAV_Y + 16, pageName(i), 2, sel ? C_TXT : C_DIM, sel ? dimc(C_CYAN, 3) : C_PANEL, MC_DATUM);
+  }
+}
+
+
+// ============================================================
+//  NUI SMART GAUGE style  (สีดึงจากภาพต้นแบบโดยตรง)
+//  พื้นดำ / กรอบตัดมุมซ้ายบน-ขวาล่าง / ตัวเลขเซกเมนต์เอียง
+// ============================================================
+constexpr uint16_t N_BG    = 0x0000;
+constexpr uint16_t N_PANEL = 0x0000;
+constexpr uint16_t K_BLUE  = rgb565(0, 163, 252);     // กรอบหลัก / ปุ่ม
+constexpr uint16_t K_YEL   = rgb565(253, 238, 3);     // SPEED / ECT label / แถวสด
+constexpr uint16_t K_AMBER = rgb565(253, 206, 1);     // ค่า ECT
+constexpr uint16_t K_CYAN  = rgb565(2, 240, 253);     // km/h / IAT / BAT
+constexpr uint16_t K_SKY   = rgb565(4, 196, 251);     // TPS / AFR label
+constexpr uint16_t K_RPM   = rgb565(9, 184, 248);     // RPM / x1000
+constexpr uint16_t K_BAT   = rgb565(0, 186, 254);
+constexpr uint16_t K_PURP  = rgb565(199, 26, 249);    // ECT border
+constexpr uint16_t K_GREEN = rgb565(42, 249, 51);     // AFR value
+constexpr uint16_t K_LIME  = rgb565(156, 251, 3);     // READY
+constexpr uint16_t K_MAPG  = rgb565(91, 249, 62);     // MAP value
+constexpr uint16_t K_MAPB  = rgb565(49, 248, 18);     // MAP border
+constexpr uint16_t K_MAG   = rgb565(250, 14, 252);    // INJ label
+constexpr uint16_t K_MAGB  = rgb565(178, 26, 242);    // INJ border
+constexpr uint16_t K_RED   = rgb565(250, 3, 14);
+constexpr uint16_t K_ORG   = rgb565(254, 144, 2);
+constexpr uint16_t K_ECU   = rgb565(54, 251, 28);     // ECU CONNECTED
+constexpr uint16_t K_HDR   = rgb565(1, 20, 35);       // พื้นหัวตาราง
+constexpr uint16_t K_GREY  = rgb565(199, 200, 201);
+constexpr uint16_t N_BLUE = K_BLUE, N_YEL = K_YEL, N_GRN = K_GREEN, N_LBLUE = K_RPM;
+
+static uint16_t gradCol(float v, const float* a, const uint16_t* c, int n) {
+  if (v <= a[0]) return c[0];
+  for (int i = 1; i < n; i++) if (v <= a[i]) return lerpc(c[i - 1], c[i], (v - a[i - 1]) / (a[i] - a[i - 1]));
+  return c[n - 1];
+}
+
+// กรอบตัดมุมซ้ายบน + ขวาล่าง (ตามภาพ) มีขอบในจาง ๆ
+static void chamfer2(int x, int y, int w, int h, int c, uint16_t edge, uint16_t fill = N_PANEL) {
+  tft.fillRect(x, y, w, h, fill);
+  tft.drawRect(x, y, w, h, edge);
+  tft.drawRect(x + 1, y + 1, w - 2, h - 2, dimc(edge, 2));
+  tft.fillTriangle(x, y, x + c, y, x, y + c, N_BG);
+  tft.fillTriangle(x + w - 1, y + h - 1, x + w - 1 - c, y + h - 1, x + w - 1, y + h - 1 - c, N_BG);
+  tft.drawLine(x + c, y, x, y + c, edge);
+  tft.drawLine(x + w - 1 - c, y + h - 1, x + w - 1, y + h - 1 - c, edge);
+}
+
+// ---------------- ตัวเลข 7 เซกเมนต์แบบเอียง ----------------
+static uint8_t segMask(char c) {
+  static const uint8_t M[10] = {0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F};  // a=1 b=2 c=4 d=8 e=16 f=32 g=64
+  if (c >= '0' && c <= '9') return M[c - '0'];
+  if (c == '-') return 0x40;
+  return 0;
+}
+static void segHex(const int* px, const int* py, int cx, int cy, int s, int h, uint16_t col) {
+  int X[6], Y[6];
+  for (int i = 0; i < 6; i++) { X[i] = cx + px[i] + s * (h - py[i]) / h; Y[i] = cy + py[i]; }
+  for (int i = 1; i < 5; i++) tft.fillTriangle(X[0], Y[0], X[i], Y[i], X[i + 1], Y[i + 1], col);
+}
+static void segH(int cx, int cy, int w, int h, int t, int s, int y0, uint16_t col) {
+  int hf = t / 2;
+  int px[6] = {0, hf, w - hf, w, w - hf, hf};
+  int py[6] = {y0 + hf, y0, y0, y0 + hf, y0 + t, y0 + t};
+  segHex(px, py, cx, cy, s, h, col);
+}
+static void segV(int cx, int cy, int h, int t, int s, int x0, int ya, int yb, uint16_t col) {
+  int hf = t / 2;
+  int px[6] = {x0 + hf, x0 + t, x0 + t, x0 + hf, x0, x0};
+  int py[6] = {ya, ya + hf, yb - hf, yb, yb - hf, ya + hf};
+  segHex(px, py, cx, cy, s, h, col);
+}
+static void segDigit(int cx, int cy, int w, int h, int t, int s, char c, uint16_t col) {
+  uint8_t m = segMask(c);
+  int mid = h / 2;
+  if (m & 1)  segH(cx, cy, w, h, t, s, 0, col);
+  if (m & 64) segH(cx, cy, w, h, t, s, mid - t / 2, col);
+  if (m & 8)  segH(cx, cy, w, h, t, s, h - t, col);
+  if (m & 32) segV(cx, cy, h, t, s, 0, 0, mid, col);
+  if (m & 2)  segV(cx, cy, h, t, s, w - t, 0, mid, col);
+  if (m & 16) segV(cx, cy, h, t, s, 0, mid, h, col);
+  if (m & 4)  segV(cx, cy, h, t, s, w - t, mid, h, col);
+}
+
+struct SegLay { int n = 0, t = 3, s = 0, h = 0, dw = 3; int16_t x[12]; char c[12]; };
+// จัดวางตัวอักษรให้พอดีกรอบ bw (ความสูงคงที่ bh, ความกว้างตัวเลขปรับตามจำนวนหลัก)
+static void segLayout(const char* str, int bx, int bw, int bh, uint8_t align, SegLay& L) {
+  L.n = 0;
+  int nd = 0, ndot = 0;
+  for (const char* p = str; *p && L.n < 11; p++) { L.c[L.n++] = *p; if (*p == '.') ndot++; else nd++; }
+  L.h = bh; L.t = max(3, bh * 14 / 100); L.s = bh * 14 / 100;
+  int g = max(2, L.t / 2 + 1);
+  int usable = bw - L.s;
+  int avail = usable - ndot * L.t - (L.n > 1 ? (L.n - 1) * g : 0);
+  L.dw = nd > 0 ? avail / nd : 3;
+  int maxDw = bh * 60 / 100;
+  if (L.dw > maxDw) L.dw = maxDw;
+  if (L.dw < 4) L.dw = 4;
+  int total = nd * L.dw + ndot * L.t + (L.n > 1 ? (L.n - 1) * g : 0);
+  int x0 = align == 0 ? bx : (align == 1 ? bx + (usable - total) / 2 : bx + usable - total);
+  for (int i = 0; i < L.n; i++) {
+    L.x[i] = x0;
+    x0 += (L.c[i] == '.' ? L.t : L.dw) + g;
+  }
+}
+
+// ช่องแสดงตัวเลขเซกเมนต์ (วาดใหม่เฉพาะหลักที่เปลี่ยน)
+struct SegField {
+  int x = 0, y = 0, w = 0, h = 0; uint8_t align = 1; uint16_t bg = N_BG, lastCol = 0;
+  char last[12] = {0}; bool valid = false;
+  void init(int x_, int y_, int w_, int h_, uint8_t a, uint16_t bg_) { x = x_; y = y_; w = w_; h = h_; align = a; bg = bg_; valid = false; }
+  void reset() { valid = false; }
+  void eraseCh(const SegLay& L, int i) {
+    if (L.c[i] == '.') { tft.fillRect(L.x[i], y + h - L.t, L.t, L.t, bg); return; }
+    int x0 = L.x[i] - 1, x1 = L.x[i] + L.dw + 1;     // เผื่อ 1 px กันเศษขอบเฉียงค้าง
+    tft.fillTriangle(x0, y + h, x1, y + h, x1 + L.s, y, bg);
+    tft.fillTriangle(x0, y + h, x1 + L.s, y, x0 + L.s, y, bg);
+  }
+  void drawCh(const SegLay& L, int i, uint16_t col) {
+    if (L.c[i] == '.') { tft.fillRect(L.x[i], y + h - L.t, L.t, L.t, col); return; }
+    if (L.c[i] != ' ') segDigit(L.x[i], y, L.dw, L.h, L.t, L.s, L.c[i], col);
+  }
+  void draw(const char* s, uint16_t col) {
+    if (valid && col == lastCol && strcmp(s, last) == 0) return;
+    SegLay L; segLayout(s, x, w, h, align, L);
+    bool same = valid && col == lastCol && strlen(s) == strlen(last);
+    for (int i = 0; same && i < L.n; i++) if ((last[i] == '.') != (s[i] == '.')) same = false;
+    if (!same) {
+      tft.fillRect(x, y, w, h, bg);
+      for (int i = 0; i < L.n; i++) drawCh(L, i, col);
+    } else {
+      for (int i = 0; i < L.n; i++) if (s[i] != last[i]) { eraseCh(L, i); drawCh(L, i, col); }
+    }
+    strncpy(last, s, sizeof(last) - 1); last[sizeof(last) - 1] = 0;
+    lastCol = col; valid = true;
+  }
+};
+
+// แถบเซกเมนต์เอียง (RPM bar / BAT / INJ) : st 0=ดับ 1=ติด 2=ปลาย(ขาว)
+struct SlantBar {
+  int x = 0, y = 0, w = 0, h = 0, n = 0, sl = 0; ColorFn fn = nullptr; uint8_t lit[48];
+  void init(int x_, int y_, int w_, int h_, int n_, int sl_, ColorFn f) {
+    x = x_; y = y_; w = w_; h = h_; n = n_ > 48 ? 48 : n_; sl = sl_; fn = f; memset(lit, 255, sizeof lit);
+  }
+  void invalidate() { memset(lit, 255, sizeof lit); }
+  void drawSeg(int i, uint8_t st) {
+    float pitch = (float)(w - sl) / n;
+    int x0 = x + (int)(i * pitch), x1 = x + (int)((i + 1) * pitch) - 2;
+    uint16_t zc = fn((i + 0.5f) / n);
+    uint16_t c = st == 2 ? 0xFFFF : (st == 1 ? zc : dimc(zc, 3));
+    tft.fillTriangle(x0, y + h - 1, x1, y + h - 1, x1 + sl, y, c);
+    tft.fillTriangle(x0, y + h - 1, x1 + sl, y, x0 + sl, y, c);
+  }
+  void set(float f, bool tip) {
+    if (f < 0) f = 0; if (f > 1) f = 1;
+    int k = (int)floorf(f * n + 0.5f);
+    for (int i = 0; i < n; i++) {
+      uint8_t st = i < k ? 1 : 0;
+      if (tip && k > 0 && i == k - 1) st = 2;
+      if (lit[i] != st) { drawSeg(i, st); lit[i] = st; }
+    }
+  }
+};
+
+static uint16_t colAfrN(float a) {            // ค่า AFR สีเขียวตามภาพ; ผอมเกิน = เหลือง/ส้ม
+  if (a < 1.0f) return C_DIM;
+  if (a < 11.0f) return K_CYAN;
+  if (a <= 16.0f) return K_GREEN;
+  if (a <= 17.5f) return K_YEL;
+  return K_ORG;
+}
+static float tpsShown() { return TPS_TILE_USE_PCT ? D.tpsPct : D.tps100; }
+static void fmtInt(char* b, size_t n, float v) { snprintf(b, n, "%d", (int)(v + (v >= 0 ? 0.5f : -0.5f))); }
+static void fmtSpeed(char* b, size_t n) { if (D.hasSpeed) fmtInt(b, n, D.speed); else snprintf(b, n, "--"); }
+static uint16_t colSpeed() { return D.hasSpeed ? C_TXT : C_DIM; }
+
+static uint16_t fnLime(float) { return rgb565(83, 251, 3); }
+static uint16_t fnMagenta(float) { return K_MAG; }
+static uint16_t arcZone(float f) {            // น้ำเงิน -> ฟ้า -> เขียว -> เหลือง -> ส้ม -> แดง (ตามเกจในภาพ)
+  static const float a[] = {0.00f, 0.12f, 0.25f, 0.38f, 0.50f, 0.66f, 0.78f, 1.00f};
+  static const uint16_t c[] = {rgb565(10, 60, 230), rgb565(0, 150, 255), rgb565(2, 240, 253), rgb565(42, 249, 51),
+                               rgb565(253, 238, 3), rgb565(254, 144, 2), rgb565(252, 10, 32), rgb565(230, 15, 30)};
+  return gradCol(f, a, c, 8);
+}
+
+// ---------------- ไอคอนเล็ก ----------------
+static void iconBat(int x, int y, uint16_t c) { tft.drawRect(x, y, 14, 8, c); tft.fillRect(x + 14, y + 2, 2, 4, c); tft.drawFastHLine(x + 3, y + 4, 3, c); tft.drawFastHLine(x + 8, y + 4, 3, c); }
+static void iconClock(int cx, int cy, uint16_t c) { tft.drawCircle(cx, cy, 6, c); tft.drawLine(cx, cy, cx, cy - 4, c); tft.drawLine(cx, cy, cx + 3, cy, c); }
+static void iconTherm(int x, int y, uint16_t c) { tft.drawRect(x + 2, y, 4, 12, c); tft.fillCircle(x + 4, y + 15, 4, c); }
+
+static void markRec() {}                       // (เก็บไว้ให้เรียกได้) ตัวบอก REC อยู่ที่หัวหน้า HOME / แถบบน
+
+// ============================================================
+//  PAGE 0 : HOME  (แดชบอร์ดหลักตามภาพ)
+// ============================================================
+#if !HOME_USE_BG
+static SegArc hArc;
+static SegField hSpeed, hEct, hAfr, hBat, hInj, hRpm, hIat, hTps, hMap;
+static SlantBar hAfrBar, hInjBar;
+static Field fHdrSt, fHdrClk;
+static uint32_t hdrT = 0;
+static bool hdrRecDot = false;
+static uint8_t hAlK = 0, hAlP = 255;        // แบนเนอร์แจ้งเตือนหน้าแรก: ชนิดที่แสดงอยู่ / เฟสกระพริบ
+
+static void homeEnter() {
+  tft.fillScreen(N_BG);
+  // ---- หัว: โลโก้ NUI + สถานะ ECU + นาฬิกา(เวลาที่เปิดเครื่อง) ----
+  for (int i = 0; i < 3; i++) {
+    int x = 2 + i * 5;
+    tft.fillTriangle(x + 6, 3, x + 10, 3, x, 22, K_RED);
+    tft.fillTriangle(x + 10, 3, x + 4, 22, x, 22, K_RED);
+  }
+  txt(22, 0, "NUI", 4, C_TXT, N_BG, TL_DATUM);
+  txt(68, 15, "GAUGE", 1, C_TXT, N_BG, TL_DATUM);
+  chamfer2(138, 3, 104, 20, 6, K_BLUE);
+  fHdrSt.set(192, 13, 88, 1, MC_DATUM, N_BG); fHdrSt.reset();
+  iconClock(259, 12, C_TXT);
+  fHdrClk.set(317, 12, 44, 2, MR_DATUM, N_BG); fHdrClk.reset();
+  hdrT = 0; hdrRecDot = false; hAlK = 0; hAlP = 255;
+
+  // ---- SPEED ----
+  chamfer2(3, 27, 86, 58, 7, K_BLUE);
+  txt(10, 31, "SPEED", 2, K_YEL, N_PANEL, TL_DATUM);
+  hSpeed.init(8, 50, 74, 26, 0, N_PANEL);
+  txt(10, 77, "km/h", 1, K_CYAN, N_PANEL, TL_DATUM);
+  // ---- ECT ----
+  chamfer2(3, 89, 86, 58, 7, K_PURP);
+  txt(10, 93, "ECT", 2, K_YEL, N_PANEL, TL_DATUM);
+  iconTherm(10, 112, K_PURP);
+  hEct.init(26, 111, 56, 24, 2, N_PANEL);
+  tft.drawCircle(72, 139, 1, K_AMBER);
+  txt(83, 137, "C", 1, K_AMBER, N_PANEL, TR_DATUM);
+
+  // ---- เกจ RPM ตรงกลาง ----
+  hArc.init(160, 98, 56, 68, -125, 250, 54, arcZone); hArc.tip = true;
+  for (int k = 0; k <= (int)(RPM_MAX / 1000); k++) {
+    float ang = -125.0f + 250.0f * k / (RPM_MAX / 1000.0f); int x, y;
+    SegArc::pt(160, 98, 46, ang, x, y);
+    char b[4]; snprintf(b, sizeof b, "%d", k);
+    txt(x, y, b, 1, k * 1000 >= RPM_REDLINE ? K_RED : C_TXT, N_BG, MC_DATUM);
+  }
+  txt(160, 68, "RPM", 2, K_RPM, N_BG, MC_DATUM);
+  hRpm.init(116, 83, 88, 24, 1, N_BG);
+  txt(160, 114, "x1000 RPM", 1, K_RPM, N_BG, MC_DATUM);
+
+  // ---- AFR / BAT / INJ ----
+  chamfer2(231, 27, 86, 58, 7, K_BLUE);
+  txt(238, 31, "AFR", 2, K_SKY, N_PANEL, TL_DATUM);
+  hAfr.init(236, 50, 76, 24, 1, N_PANEL);
+  hAfrBar.init(238, 77, 70, 5, 10, 0, fnLime);
+  chamfer2(231, 89, 86, 26, 6, K_BAT);
+  iconBat(237, 98, K_BAT);
+  hBat.init(256, 94, 44, 16, 2, N_PANEL);
+  txt(312, 102, "V", 1, K_CYAN, N_PANEL, MR_DATUM);
+  chamfer2(231, 119, 86, 28, 6, K_MAGB);
+  txt(237, 123, "INJ", 1, K_MAG, N_PANEL, TL_DATUM);
+  hInj.init(256, 122, 42, 14, 2, N_PANEL);
+  txt(312, 130, "ms", 1, K_MAG, N_PANEL, MR_DATUM);
+  hInjBar.init(238, 139, 70, 3, 8, 0, fnMagenta);
+
+  // ---- IAT / TPS / MAP ----
+  chamfer2(3, 151, 102, 86, 8, K_BAT);
+  txt(11, 156, "IAT", 2, K_CYAN, N_PANEL, TL_DATUM);
+  hIat.init(11, 179, 86, 40, 1, N_PANEL);
+  tft.drawCircle(88, 221, 1, K_CYAN); txt(97, 220, "C", 1, K_CYAN, N_PANEL, TR_DATUM);
+  chamfer2(109, 151, 102, 86, 8, K_BLUE);
+  txt(117, 156, "TPS", 2, K_SKY, N_PANEL, TL_DATUM);
+  hTps.init(117, 179, 86, 40, 1, N_PANEL);
+  txt(203, 220, "%", 1, K_SKY, N_PANEL, TR_DATUM);
+  chamfer2(215, 151, 102, 86, 8, K_MAPB);
+  txt(223, 156, "MAP", 2, K_MAPG, N_PANEL, TL_DATUM);
+  hMap.init(223, 179, 86, 40, 1, N_PANEL);
+  txt(309, 220, "kPa", 1, K_MAPG, N_PANEL, TR_DATUM);
+
+  hSpeed.reset(); hEct.reset(); hAfr.reset(); hBat.reset(); hInj.reset(); hRpm.reset(); hIat.reset(); hTps.reset(); hMap.reset();
+  hAfrBar.invalidate(); hInjBar.invalidate();
+}
+
+// แบนเนอร์แจ้งเตือนใต้เกจ RPM : อุณหภูมิสูง (แดง) / ถึงรอบเปลี่ยนเกียร์ (เหลือง) กระพริบ
+static void homeAlert(uint32_t now) {
+  uint8_t kind = 0;
+  if (g_tempAct && g_shiftAct) kind = ((now / 1200) & 1) ? 2 : 1;      // เตือนพร้อมกัน -> สลับกัน
+  else if (g_tempAct) kind = 1;
+  else if (g_shiftAct) kind = 2;
+  uint8_t ph = (now / (kind == 2 ? 120 : 250)) & 1;                     // เปลี่ยนเกียร์กระพริบถี่กว่า
+  if (kind == hAlK && (kind == 0 || ph == hAlP)) return;
+  hAlK = kind; hAlP = ph;
+  const int bx = 116, by = 130, bw = 88, bh = 19;      // ใต้ตัวเลข 0 และ 12 ของวงเกจ ไม่ทับป้ายรอบ
+  if (!kind) { tft.fillRect(bx, by, bw, bh, N_BG); return; }
+  uint16_t c = kind == 1 ? K_RED : K_YEL;
+  uint16_t fill = ph ? c : N_BG, fg = ph ? (kind == 1 ? C_TXT : C_BG) : c;
+  tft.fillRect(bx, by, bw, bh, fill);
+  tft.drawRect(bx, by, bw, bh, c);
+  txt(bx + bw / 2, by + bh / 2 + 1, kind == 1 ? "HIGH TEMP" : "SHIFT UP!", 2, fg, fill, MC_DATUM);
+}
+
+static void homeUpdate(uint32_t now) {
+  char b[16];
+  homeAlert(now);
+  // หัว (อัปเดตทุก 400 ms)
+  if (now - hdrT > 400) {
+    hdrT = now;
+    const char* s = "ECU OFFLINE"; uint16_t c = C_DIM;
+    switch (ST) {
+      case ECU_ONLINE:     s = "ECU CONNECTED"; c = (curDtcCount > 0) ? K_RED : K_ECU; break;
+      case ECU_CONNECTING: s = "CONNECTING..."; c = K_YEL; break;
+      case ECU_DEMO:       s = "DEMO MODE";     c = K_CYAN; break;
+      default: break;
+    }
+    if (g_tempAct) { s = "HIGH TEMP"; c = ((now / 400) & 1) ? K_RED : dimc(K_RED, 1); }
+    fHdrSt.draw(s, c);
+    uint32_t m = now / 60000;
+    snprintf(b, sizeof b, "%02lu:%02lu", (unsigned long)(m / 60 % 100), (unsigned long)(m % 60));
+    fHdrClk.draw(b, C_TXT);
+    bool rd = g_mapRec && ((now / 500) & 1);
+    if (rd != hdrRecDot) { hdrRecDot = rd; tft.fillCircle(146, 13, 3, rd ? K_RED : N_BG); }
+  }
+  // เกจ + RPM
+  hArc.set(sRpm / RPM_MAX);
+  int r = ((int)(sRpm + 0.5f) + 5) / 10 * 10;
+  snprintf(b, sizeof b, "%d", r); hRpm.draw(b, colRpm((float)r));
+  fmtSpeed(b, sizeof b);          hSpeed.draw(b, colSpeed());
+  fmtInt(b, sizeof b, sEot);      hEct.draw(b, (sEot >= EOT_CRIT || g_tempAct) ? K_RED : K_AMBER);
+  snprintf(b, sizeof b, "%.1f", sAfr);  hAfr.draw(b, colAfrN(sAfr));
+  hAfrBar.set((sAfr - 10.0f) / 10.0f, false);
+  snprintf(b, sizeof b, "%.1f", sBatt); hBat.draw(b, C_TXT);
+  snprintf(b, sizeof b, "%.2f", D.injMs); hInj.draw(b, C_TXT);
+  hInjBar.set(D.injMs / 6.0f, false);
+  if (D.hasIat) { if (D.iatC >= 99.95f) fmtInt(b, sizeof b, D.iatC); else snprintf(b, sizeof b, "%.1f", D.iatC); hIat.draw(b, C_TXT); } else hIat.draw("--", C_DIM);
+  fmtInt(b, sizeof b, tpsShown()); hTps.draw(b, C_TXT);
+  if (D.hasMap) { if (D.mapKpa >= 99.95f) fmtInt(b, sizeof b, D.mapKpa); else snprintf(b, sizeof b, "%.1f", D.mapKpa); hMap.draw(b, K_MAPG); } else hMap.draw("--", C_DIM);   // >= 100 แสดงเป็นจำนวนเต็ม ให้ตัวเลขพอดีกรอบ
+}
+static bool homeTap(int x, int y) {
+  (void)x; (void)y;
+  return false;
+}
+static void homeLeave() {}
+#else   // HOME_USE_BG
+// ============================================================
+//  PAGE 0 : HOME  —  พื้นหลังสำเร็จรูป (include/home_bg.h) + วาดเฉพาะค่าที่เปลี่ยนทับ
+//  สร้างพื้นหลังใหม่: python3 tools/make_home_bg.py assets/home_target.png include/home_bg.h --max=12 --warn=8.5
+//  ตัวเลขใช้ฟอนต์ anti-alias (include/num_font.h) ผสมกับพื้นหลังจริงทีละพิกเซล -> ไม่มีกล่องสีทึบทับ
+// ============================================================
+static_assert(RPM_MAX == HB_DIAL_MAXK * 1000.0f, "RPM_MAX (config.h) ต้องตรงกับ --max ที่ใช้สร้าง home_bg.h");
+
+static bool hHot = false;                    // กรอบ ECT โทนแดง (เครื่องร้อน)
+static int  hRingK = 0;                      // จำนวนขั้นของแถบรอบที่ติดอยู่ตอนนี้ (0..HB_DIAL_NSTEP)
+
+static inline uint16_t hbPx(int x, int y) {
+  if (hHot && x >= HB_HOT_X && x < HB_HOT_X + HB_HOT_W && y >= HB_HOT_Y && y < HB_HOT_Y + HB_HOT_H)
+    return pgm_read_word(&HOME_HOT[(y - HB_HOT_Y) * HB_HOT_W + (x - HB_HOT_X)]);
+  return pgm_read_word(&HOME_BG[y * HB_W + x]);
+}
+static void hbCopy(int x, int y, int w, int h, uint16_t* buf) {          // คัดลอกพื้นหลังสี่เหลี่ยมลงบัฟเฟอร์
+  for (int j = 0; j < h; j++)
+    for (int i = 0; i < w; i++) {
+      int px = x + i, py = y + j;
+      buf[j * w + i] = (px < 0 || px >= HB_W || py < 0 || py >= HB_H) ? 0 : hbPx(px, py);
+    }
+}
+static void hbRestore(int x, int y, int w, int h) {                      // วาดพื้นหลังเดิมกลับลงจอ (ลบของที่วาดทับ)
+  static uint16_t line[HB_W];
+  if (x < 0) { w += x; x = 0; }
+  if (y < 0) { h += y; y = 0; }
+  if (x + w > HB_W) w = HB_W - x;
+  if (y + h > HB_H) h = HB_H - y;
+  if (w <= 0 || h <= 0) return;
+  tft.setSwapBytes(true);
+  for (int j = 0; j < h; j++) { hbCopy(x, y + j, w, 1, line); tft.pushImage(x, y + j, w, 1, line); }
+  tft.setSwapBytes(false);
+}
+static inline uint16_t hbBlend(uint16_t bg, uint16_t fg, uint8_t a5) {   // a5 = 0..32
+  uint32_t b = (bg | ((uint32_t)bg << 16)) & 0x07E0F81FUL;
+  uint32_t f = (fg | ((uint32_t)fg << 16)) & 0x07E0F81FUL;
+  uint32_t r = ((((f - b) * a5) >> 5) + b) & 0x07E0F81FUL;
+  return (uint16_t)(r | (r >> 16));
+}
+
+// ---- ตัวเลข anti-alias : เลือกฟอนต์ใหญ่สุด (ไม่เกิน pref) ที่ยัดพอดีกล่อง w x h ----
+static const NumFont* const HB_NF[5] = {&NF_S, &NF_M, &NF_L, &NF_LL, &NF_XL};
+static int nfWidth(const NumFont& f, const char* s) {
+  int w = 0; NfGlyph g;
+  for (; *s; s++) { int i = nfIndex(*s); if (i < 0) continue; memcpy_P(&g, &f.g[i], sizeof g); w += g.adv; }
+  return w;
+}
+static void nfDraw(int x, int y, int w, int h, uint8_t align, const char* s, uint16_t col, int pref) {
+  int fi = pref;
+  while (fi > 0 && (nfWidth(*HB_NF[fi], s) > w || HB_NF[fi]->asc > h)) fi--;
+  const NumFont& f = *HB_NF[fi];
+  uint16_t* buf = (uint16_t*)malloc((size_t)w * h * sizeof(uint16_t));
+  if (!buf) return;
+  hbCopy(x, y, w, h, buf);
+  const int tw = nfWidth(f, s);
+  int cx = align == 0 ? 0 : (align == 1 ? (w - tw) / 2 : w - tw);
+  const int base = (h + f.asc) / 2;
+  NfGlyph g;
+  for (; *s; s++) {
+    int gi = nfIndex(*s); if (gi < 0) continue;
+    memcpy_P(&g, &f.g[gi], sizeof g);
+    const int nb = (g.w + 1) / 2;
+    for (int j = 0; j < g.h; j++) {
+      int py = base + g.yo + j; if (py < 0 || py >= h) continue;
+      for (int i = 0; i < g.w; i++) {
+        int px = cx + g.xo + i; if (px < 0 || px >= w) continue;
+        uint8_t v = pgm_read_byte(f.bmp + g.off + j * nb + (i >> 1));
+        uint8_t a = (i & 1) ? (v & 15) : (v >> 4);
+        if (!a) continue;
+        uint16_t& d = buf[py * w + px];
+        d = a >= 15 ? col : hbBlend(d, col, (uint8_t)((a * 32 + 7) / 15));
+      }
+    }
+    cx += g.adv;
+  }
+  tft.setSwapBytes(true);
+  tft.pushImage(x, y, w, h, buf);
+  tft.setSwapBytes(false);
+  free(buf);
+}
+
+struct HNum {                                  // ช่องตัวเลข (วาดใหม่เฉพาะตอนค่า/สีเปลี่ยน)
+  int x = 0, y = 0, w = 0, h = 0, pref = 3; uint8_t align = 2; uint16_t lastCol = 0; char last[12] = {0}; bool valid = false;
+  void init(int x_, int y_, int w_, int h_, uint8_t a, int p) { x = x_; y = y_; w = w_; h = h_; align = a; pref = p; valid = false; }
+  void reset() { valid = false; }
+  void draw(const char* s, uint16_t col) {
+    if (valid && col == lastCol && strcmp(s, last) == 0) return;
+    nfDraw(x, y, w, h, align, s, col, pref);
+    strncpy(last, s, sizeof(last) - 1); last[sizeof(last) - 1] = 0;
+    lastCol = col; valid = true;
+  }
+};
+struct HLabel {                                // ป้ายข้อความ (ใช้ฟอนต์สปอร์ต/ไทยเดิม) : ล้างด้วยพื้นหลังจริงก่อนวาด
+  int x = 0, y = 0, w = 0, h = 0, tx = 0, ty = 0; uint8_t font = 1, datum = MC_DATUM; uint16_t lastCol = 0; char last[40] = {0}; bool valid = false;
+  void init(int x_, int y_, int w_, int h_, int tx_, int ty_, uint8_t font_, uint8_t datum_) { x = x_; y = y_; w = w_; h = h_; tx = tx_; ty = ty_; font = font_; datum = datum_; valid = false; }
+  void reset() { valid = false; }
+  void draw(const char* s, uint16_t col) {
+    if (valid && col == lastCol && strcmp(s, last) == 0) return;
+    hbRestore(x, y, w, h);
+    if (*s) txt(tx, ty, s, font, col, C_BG, datum);
+    strncpy(last, s, sizeof(last) - 1); last[sizeof(last) - 1] = 0;
+    lastCol = col; valid = true;
+  }
+};
+
+// ---- แถบรอบ RPM : คัดลอกพิกเซล "ติด" จาก HOME_RING_LIT / "ดับ" จากพื้นหลัง เฉพาะขั้นที่เปลี่ยน ----
+static void ringSet(int kn) {
+  if (kn < 0) kn = 0;
+  if (kn > HB_DIAL_NSTEP) kn = HB_DIAL_NSTEP;
+  if (kn == hRingK) return;
+  int lo = min(hRingK, kn) - 1, hi = max(hRingK, kn);                  // ขั้นที่ต้องวาดใหม่ (รวมปลายเข็มเดิม/ใหม่)
+  if (lo < 0) lo = 0;
+  if (hi > HB_DIAL_NSTEP - 1) hi = HB_DIAL_NSTEP - 1;
+  static uint16_t run[HB_RING_W];
+  tft.setSwapBytes(true);
+  for (int j = 0; j < HB_RING_H; j++) {
+    const int rmin = pgm_read_byte(&HOME_RING_RMIN[j]), rmax = pgm_read_byte(&HOME_RING_RMAX[j]);
+    if (rmin > hi || rmax < lo) continue;
+    int rs = -1, n = 0;
+    for (int i = 0; i <= HB_RING_W; i++) {
+      const int idx = i < HB_RING_W ? pgm_read_byte(&HOME_RING_IDX[j * HB_RING_W + i]) : 255;
+      if (idx != 255 && idx >= lo && idx <= hi) {
+        if (rs < 0) { rs = i; n = 0; }
+        const int o = j * HB_RING_W + i;
+        uint16_t c;
+        if (idx < kn - 1) c = pgm_read_word(&HOME_RING_LIT[o]);
+        else if (idx == kn - 1) c = hbBlend(pgm_read_word(&HOME_RING_LIT[o]), 0xFFFF, 18);   // ปลายเข็มสว่างขาวขึ้น
+        else c = hbPx(HB_RING_X + i, HB_RING_Y + j);
+        run[n++] = c;
+      } else if (rs >= 0) {
+        tft.pushImage(HB_RING_X + rs, HB_RING_Y + j, n, 1, run);
+        rs = -1;
+      }
+    }
+  }
+  tft.setSwapBytes(false);
+  hRingK = kn;
+}
+
+// ---- แถบ AFR / INJ แบบช่องเอียง (วาดทั้งแถบลงบัฟเฟอร์เดียว) ----
+static void hbBar(int x, int y, int w, int h, int n, int k, uint16_t cOn, uint16_t cWarn, int warnFrom, uint16_t cOff) {
+  uint16_t* buf = (uint16_t*)malloc((size_t)w * h * sizeof(uint16_t));
+  if (!buf) return;
+  hbCopy(x, y, w, h, buf);
+  const float pitch = (float)w / n;
+  for (int s = 0; s < n; s++) {
+    const int x0 = (int)(s * pitch), x1 = (int)((s + 1) * pitch) - 3;
+    const uint16_t c = s < k ? (s >= warnFrom ? cWarn : cOn) : cOff;
+    for (int j = 0; j < h; j++) {
+      const int off = (h - 1 - j) * 2 / h;                                // เอียงไปทางขวาด้านบน
+      for (int i = x0 + off; i <= x1 + off; i++) if (i >= 0 && i < w) buf[j * w + i] = c;
+    }
+  }
+  tft.setSwapBytes(true);
+  tft.pushImage(x, y, w, h, buf);
+  tft.setSwapBytes(false);
+  free(buf);
+}
+
+static HNum hSpeed, hEct, hAfr, hBat, hInj, hRpm, hIat, hTps, hMap, hClk;
+static HLabel hSpLbl, hStatus;
+static int hAfrK = -1, hInjK = -1;
+static uint32_t hdrT = 0;
+static uint8_t hAlK = 0, hAlP = 255;        // แบนเนอร์แจ้งเตือน: ชนิดที่แสดงอยู่ / เฟสกระพริบ
+
+static void homeDialLabels() {              // ตัวเลข 0..12 รอบวงเกจ
+  const int kmax = (int)(HB_DIAL_MAXK + 0.5f);
+  for (int k = 0; k <= kmax; k++) {
+    const float ang = HB_DIAL_A0 + HB_DIAL_SWEEP * k / HB_DIAL_MAXK;
+    int x, y; SegArc::pt(HB_DIAL_CX, HB_DIAL_CY, HB_DIAL_LABEL_R, ang, x, y);
+    char b[4]; snprintf(b, sizeof b, "%d", k);
+    nfDraw(x - 9, y - 6, 18, 12, 1, b, (k * 1000.0f >= RPM_WARN) ? K_RED : C_TXT, 0);
+  }
+}
+
+static void homeEnter() {
+  g_bgHook = hbCopy;
+  hHot = false; hRingK = 0; hAfrK = hInjK = -1; hdrT = 0; hAlK = 0; hAlP = 255;
+  tft.setSwapBytes(true);
+  for (int y = 0; y < HB_H; y += 8) tft.pushImage(0, y, HB_W, 8, HOME_BG + (uint32_t)y * HB_W);
+  tft.setSwapBytes(false);
+
+  hSpLbl.init(HB_SPLBL_X, HB_SPLBL_Y, HB_SPLBL_W, HB_SPLBL_H, HB_SPLBL_X + 1, HB_SPLBL_Y + 1, 2, TL_DATUM);
+  hStatus.init(HB_STATUS_X + 10, HB_STATUS_Y, HB_STATUS_W - 12, HB_STATUS_H, HB_STATUS_X + 10 + (HB_STATUS_W - 12) / 2 + 1, HB_STATUS_Y + HB_STATUS_H / 2, 1, MC_DATUM);
+  hSpeed.init(HB_SPEED_X, HB_SPEED_Y, HB_SPEED_W, HB_SPEED_H, 1, 3);
+  hEct.init(HB_ECT_X, HB_ECT_Y, HB_ECT_W, HB_ECT_H, 2, 3);
+  hRpm.init(HB_RPM_X, HB_RPM_Y, HB_RPM_W, HB_RPM_H, 1, 3);
+  hAfr.init(HB_AFR_X, HB_AFR_Y, HB_AFR_W, HB_AFR_H, 2, 3);
+  hBat.init(HB_BAT_X, HB_BAT_Y, HB_BAT_W, HB_BAT_H, 2, 2);
+  hInj.init(HB_INJ_X, HB_INJ_Y, HB_INJ_W, HB_INJ_H, 2, 2);
+  hIat.init(HB_IAT_X, HB_IAT_Y, HB_IAT_W, HB_IAT_H, 2, 4);
+  hTps.init(HB_TPS_X, HB_TPS_Y, HB_TPS_W, HB_TPS_H, 2, 4);
+  hMap.init(HB_MAP_X, HB_MAP_Y, HB_MAP_W, HB_MAP_H, 2, 4);
+  hClk.init(HB_CLOCK_X, HB_CLOCK_Y, HB_CLOCK_W, HB_CLOCK_H, 2, 2);
+  homeDialLabels();
+}
+
+// แบนเนอร์แจ้งเตือนใต้เกจ RPM : อุณหภูมิสูง (แดง) / ถึงรอบเปลี่ยนเกียร์ (เหลือง) กระพริบ
+static void homeAlert(uint32_t now) {
+  uint8_t kind = 0;
+  if (g_tempAct && g_shiftAct) kind = ((now / 1200) & 1) ? 2 : 1;      // เตือนพร้อมกัน -> สลับกัน
+  else if (g_tempAct) kind = 1;
+  else if (g_shiftAct) kind = 2;
+  uint8_t ph = (now / (kind == 2 ? 120 : 250)) & 1;                     // เปลี่ยนเกียร์กระพริบถี่กว่า
+  if (kind == hAlK && (kind == 0 || ph == hAlP)) return;
+  hAlK = kind; hAlP = ph;
+  const int bx = 122, by = 136, bw = 84, bh = 19;                       // ใต้เลข 0 / 12 ของวงเกจ (พื้นดำ)
+  if (!kind) { hbRestore(bx, by, bw, bh); return; }
+  uint16_t c = kind == 1 ? K_RED : K_YEL;
+  uint16_t fill = ph ? c : N_BG, fg = ph ? (kind == 1 ? C_TXT : C_BG) : c;
+  tft.fillRect(bx, by, bw, bh, fill);
+  tft.drawRect(bx, by, bw, bh, c);
+  void (*hk)(int, int, int, int, uint16_t*) = g_bgHook; g_bgHook = nullptr;   // ข้อความบนแถบสีทึบ ไม่ใช้พื้นหลังภาพ
+  txt(bx + bw / 2, by + bh / 2 + 1, kind == 1 ? "HIGH TEMP" : "SHIFT UP!", 2, fg, fill, MC_DATUM);
+  g_bgHook = hk;
+}
+
+static void homeUpdate(uint32_t now) {
+  char b[16];
+  homeAlert(now);
+  // กรอบ ECT สลับเป็นโทนแดงตามภาพต้นฉบับเมื่อเครื่องร้อน
+  const bool hot = (sEot >= EOT_CRIT || g_tempAct);
+  if (hot != hHot) { hHot = hot; hbRestore(HB_HOT_X, HB_HOT_Y, HB_HOT_W, HB_HOT_H); hEct.reset(); }
+
+  // หัว (อัปเดตทุก 400 ms)
+  if (now - hdrT > 400) {
+    hdrT = now;
+    const char* s = "ECU OFFLINE"; uint16_t c = C_DIM;
+    switch (ST) {
+      case ECU_ONLINE:     s = "ECU CONNECTED"; c = (curDtcCount > 0) ? K_RED : K_ECU; break;
+      case ECU_CONNECTING: s = "CONNECTING..."; c = K_YEL; break;
+      case ECU_DEMO:       s = "DEMO MODE";     c = K_CYAN; break;
+      default: break;
+    }
+    if (g_tempAct) { s = "HIGH TEMP"; c = ((now / 400) & 1) ? K_RED : dimc(K_RED, 1); }
+    hStatus.draw(s, c);
+    const int dx = HB_STATUS_X + 5, dy = HB_STATUS_Y + HB_STATUS_H / 2;        // จุดสถานะ (REC กระพริบแดง)
+    hbRestore(dx - 4, dy - 4, 9, 9);
+    tft.fillCircle(dx, dy, 3, (g_mapRec && ((now / 500) & 1)) ? K_RED : c);
+    uint32_t m = now / 60000;
+    snprintf(b, sizeof b, "%02lu:%02lu", (unsigned long)(m / 60 % 100), (unsigned long)(m % 60));
+    hClk.draw(b, C_TXT);
+  }
+  // ป้ายความเร็ว (แปลภาษาตาม EN/TH)
+  if (g_spdPhone) hSpLbl.draw("GPS", K_LIME); else hSpLbl.draw("SPEED", K_YEL);   // ป้ายเปลี่ยนเป็น GPS เมื่อความเร็วมาจากมือถือ
+
+  // เกจ + RPM
+  ringSet((int)(sRpm / RPM_MAX * HB_DIAL_NSTEP + 0.5f));
+  int r = ((int)(sRpm + 0.5f) + 5) / 10 * 10;
+  snprintf(b, sizeof b, "%d", r); hRpm.draw(b, colRpm((float)r));
+  fmtSpeed(b, sizeof b);          hSpeed.draw(b, colSpeed());
+  fmtInt(b, sizeof b, sEot);      hEct.draw(b, hot ? K_RED : K_AMBER);
+  snprintf(b, sizeof b, "%.1f", sAfr);  hAfr.draw(b, colAfrN(sAfr));
+  int ak = (int)((sAfr - 10.0f) / 10.0f * 10 + 0.5f); ak = ak < 0 ? 0 : (ak > 10 ? 10 : ak);
+  if (ak != hAfrK) { hAfrK = ak; hbBar(HB_AFRBAR_X, HB_AFRBAR_Y, HB_AFRBAR_W, HB_AFRBAR_H, 10, ak, rgb565(83, 251, 3), K_YEL, 7, rgb565(38, 46, 60)); }
+  snprintf(b, sizeof b, "%.1f", sBatt); hBat.draw(b, C_TXT);
+  snprintf(b, sizeof b, "%.2f", D.injMs); hInj.draw(b, C_TXT);
+  int ik = (int)(D.injMs / 6.0f * 8 + 0.5f); ik = ik < 0 ? 0 : (ik > 8 ? 8 : ik);
+  if (ik != hInjK) { hInjK = ik; hbBar(HB_INJBAR_X, HB_INJBAR_Y, HB_INJBAR_W, HB_INJBAR_H, 8, ik, K_MAG, K_MAG, 8, rgb565(52, 20, 74)); }
+  if (D.hasIat) { if (D.iatC >= 99.95f) fmtInt(b, sizeof b, D.iatC); else snprintf(b, sizeof b, "%.1f", D.iatC); hIat.draw(b, C_TXT); } else hIat.draw("--", C_DIM);
+  fmtInt(b, sizeof b, tpsShown()); hTps.draw(b, C_TXT);
+  if (D.hasMap) { if (D.mapKpa >= 99.95f) fmtInt(b, sizeof b, D.mapKpa); else snprintf(b, sizeof b, "%.1f", D.mapKpa); hMap.draw(b, K_MAPG); } else hMap.draw("--", C_DIM);   // >= 100 แสดงเป็นจำนวนเต็ม ให้ตัวเลขพอดีกรอบ
+}
+static bool homeTap(int x, int y) {
+  (void)x; (void)y;
+  return false;
+}
+static void homeLeave() { g_bgHook = nullptr; }
+#endif  // HOME_USE_BG
+
+
+// ============================================================
+//  PAGE 2 : GRID  (ตารางสีเรียลไทม์ INJ / AFR / IGT ตาม RPM x TPS + บันทึกค่า)
+//  เก็บที่ความละเอียดสูงสุด 100 rpm x 0.5 TPS  แล้วย่อ/ขยายมุมมองด้วยปุ่ม ZOOM
+// ============================================================
+// ---- โครงตาราง: แสดงครบหน้าเดียว (25 คอลัมน์ TPS x 12 แถว RPM ทีละ 1000 rpm) ไม่มีซูม/เลื่อน ----
+constexpr int MP_NROWS = 12;                         // 1000..12000 (กลุ่มละ 1000 rpm : 1000 = 1200-1900, 2000 = 2000-2900 ...)
+constexpr int MP_SPAN  = 1000;
+constexpr int MP_X0 = 18, MP_CW = 12;                // ช่องกว้าง 12 px x 25 คอลัมน์ = 300 px
+constexpr int MP_Y0 = 55, MP_RH = 10;                // ช่องสูง 10 px x 12 แถว = 120 px
+constexpr int MP_LBL_A = 38, MP_LBL_B = 46;          // ป้าย TPS 2 แถวสลับกัน (คู่/คี่) ให้อ่านได้ครบทั้ง 25 ค่า
+constexpr int MP_TABS_Y = 20, MP_STAT_Y = 178;
+constexpr int MP_BTN_Y = 206, MP_BTN_H = 30;
+static const int MP_BX[3] = {3, 109, 215};           // แท็บ INJ / AFR / IGT
+constexpr int MP_BW = 102;
+static const int MP_KX[4] = {2, 70, 138, 218};       // ปุ่มล่าง: BACK / SAVE / CLEAR / REC
+static const int MP_KW[4] = {64, 64, 76, 100};
+
+static uint8_t mapTab = 1;            // 0 = INJ, 1 = AFR, 2 = IGT
+static int mapCurGi = -1, mapCurGc = -1;           // ช่องที่ตรงกับค่าสดตอนนี้
+static int mapSelGi = -1, mapSelGc = -1;           // ช่องที่แตะดูค่า
+static uint32_t mapSelUntil = 0; static char mapInfo[72] = "";
+static bool mapRecOk = false;                      // ตัวอย่างล่าสุดถูกบันทึกหรือไม่
+static uint8_t mapArmClr = 0; static uint32_t mapArmUntil = 0;
+static char mapMsg[32] = ""; static uint16_t mapMsgCol = C_DIM; static uint32_t mapMsgUntil = 0;
+static uint32_t mapSeenSeq = 0;
+static bool mapDirtyAll = true;
+static int mapPrevPage = 0;
+static Field fMpState, fMpCell, fMpLive, fMpPts, fMpMsg, fMpHdr, fMpBat, fMpRec;
+
+static void mapRowRange(int gi, int& r0, int& r1) {
+  int lo = MP_SPAN * (MAP_RPM_MIN / MP_SPAN + gi);
+  r0 = lo <= MAP_RPM_MIN ? 0 : (lo - MAP_RPM_MIN) / MAP_RPM_STEP;
+  r1 = (lo + MP_SPAN - MAP_RPM_STEP - MAP_RPM_MIN) / MAP_RPM_STEP;
+  if (r1 > MAP_ROWS - 1) r1 = MAP_ROWS - 1;
+  if (r0 > r1) r0 = r1;
+}
+static int mapRowRpm(int gi) { return MP_SPAN * (MAP_RPM_MIN / MP_SPAN + gi); }
+
+// ---- ตัวเลขจิ๋ว 3x7 พิกเซล (ใช้เฉพาะในตาราง ให้ค่าทศนิยมพอดีช่องกว้าง 12 px) ----
+static const uint8_t MG[12][7] = {
+  {7,5,5,5,5,5,7}, {2,6,2,2,2,2,7}, {7,1,1,7,4,4,7}, {7,1,1,7,1,1,7}, {5,5,5,7,1,1,1}, {7,4,4,7,1,1,7},
+  {7,4,4,7,5,5,7}, {7,1,1,2,2,2,2}, {7,5,5,7,5,5,7}, {7,5,5,7,1,1,7}, {0,0,0,0,0,0,1}, {0,0,0,7,0,0,0}};
+static int microW(const char* t) {
+  int w = 0;
+  for (; *t; t++) { w += (*t == '.') ? 1 : 3; if (t[1] && *t != '.') w += 1; }
+  return w;
+}
+static void microPut(uint16_t* buf, int bw, int bh, int ox, int oy, const char* t, uint16_t fg) {
+  int x = ox;
+  for (; *t; t++) {
+    char c = *t; int gi = (c >= '0' && c <= '9') ? c - '0' : (c == '.' ? 10 : (c == '-' ? 11 : -1));
+    if (gi < 0) continue;
+    int gw = (c == '.') ? 1 : 3;
+    for (int r = 0; r < 7; r++) for (int k = 0; k < gw; k++) {
+      bool on = gw == 1 ? (MG[gi][r] & 1) : (MG[gi][r] & (4 >> k));
+      int px = x + k, py = oy + r;
+      if (on && px >= 0 && px < bw && py >= 0 && py < bh) buf[py * bw + px] = fg;
+    }
+    x += gw; if (c != '.') x += 1;
+  }
+}
+static void microBlit(int x, int y, int w, int h, uint16_t* buf) {
+  tft.setSwapBytes(true); tft.pushImage(x, y, w, h, buf); tft.setSwapBytes(false);
+}
+
+// ---- สีของตาราง ----
+static uint16_t mapColor(int tab, float v) {
+  if (tab == 1) {            // AFR : ม่วง/น้ำเงิน(รวย) -> ฟ้า -> ฟ้าอ่อน -> เขียว -> เหลือง -> ส้ม -> แดง(ผอม)  (สีตามภาพ)
+    static const float a[] = {10.0f, 11.5f, 12.4f, 12.9f, 13.1f, 14.7f, 16.0f, 18.0f};
+    static const uint16_t c[] = {rgb565(110, 50, 255), rgb565(30, 110, 255), rgb565(0, 184, 254), rgb565(0, 251, 254),
+                                 rgb565(64, 251, 32), rgb565(253, 238, 3), rgb565(254, 144, 2), rgb565(252, 10, 32)};
+    return gradCol(v, a, c, 8);
+  }
+  if (tab == 0) {            // INJ ms : ส้ม -> ส้มแดง -> แดง
+    static const float a[] = {0.0f, 3.0f, 6.0f, 12.0f};
+    static const uint16_t c[] = {rgb565(254, 190, 2), rgb565(254, 144, 2), rgb565(253, 86, 9), rgb565(252, 10, 32)};
+    return gradCol(v, a, c, 4);
+  }
+  static const float a[] = {0.0f, 15.0f, 30.0f, 45.0f};   // IGT deg : ฟ้า -> เขียว -> เหลือง -> แดง
+  static const uint16_t c[] = {rgb565(0, 184, 254), rgb565(64, 251, 32), rgb565(253, 238, 3), rgb565(252, 10, 32)};
+  return gradCol(v, a, c, 4);
+}
+static const uint8_t MP_VIDX[3] = {1, 0, 2};   // แท็บ -> ดัชนีใน MapAgg.v
+
+// ---- วาดตาราง ----
+// ตัวเลขในช่อง = ค่า x10 เป็นจำนวนเต็ม (AFR 14.7 -> 147) เพื่อให้พอดีช่อง 12 px ; ค่าจริงทศนิยมดูได้โดยแตะที่ช่อง
+static void mapFmt(char* b, size_t n, float v) {
+  int t = (int)lroundf(v * 10.0f);
+  if (t > 999) t = 999;
+  if (t < -99) t = -99;
+  snprintf(b, n, "%d", t);
+}
+static void mapFmtReal(char* b, size_t n, float v) { snprintf(b, n, mapTab == 0 ? "%.2f" : "%.1f", v); }
+static void mapCell(int gi, int gc) {
+  if (gi < 0 || gi >= MP_NROWS || gc < 0 || gc >= MAP_COLS) return;
+  int x = MP_X0 + gc * MP_CW, y = MP_Y0 + (MP_NROWS - 1 - gi) * MP_RH;
+  int r0, r1; mapRowRange(gi, r0, r1);
+  MapAgg a; mapAggregate(r0, r1, gc, gc, a);
+  static uint16_t cb[MP_CW * MP_RH];
+  uint16_t bg = rgb565(9, 19, 38);
+  if (a.cnt) bg = mapColor(mapTab, a.v[MP_VIDX[mapTab]]);
+  for (int i = 0; i < MP_CW * MP_RH; i++) cb[i] = bg;
+  if (a.cnt) {
+    char b[10]; mapFmt(b, sizeof b, a.v[MP_VIDX[mapTab]]);
+    microPut(cb, MP_CW, MP_RH, (MP_CW - 1 - microW(b)) / 2, 1, b, C_BG);
+    for (int j = 0; j < MP_RH; j++) cb[j * MP_CW + MP_CW - 1] = rgb565(9, 19, 38);     // เส้นคั่นช่อง 1 px
+  } else {                                           // ช่องว่าง: เส้นตารางจาง ๆ
+    uint16_t gl = rgb565(24, 40, 74);
+    for (int i = 0; i < MP_CW; i++) cb[(MP_RH - 1) * MP_CW + i] = gl;
+    for (int j = 0; j < MP_RH; j++) cb[j * MP_CW + MP_CW - 1] = gl;
+  }
+  uint16_t oc = 0; bool ol = false;
+  if (gi == mapSelGi && gc == mapSelGc) { oc = N_YEL; ol = true; }
+  if (gi == mapCurGi && gc == mapCurGc) { oc = 0xFFFF; ol = true; }
+  if (ol) {
+    for (int i = 0; i < MP_CW; i++) { cb[i] = oc; cb[(MP_RH - 1) * MP_CW + i] = oc; }
+    for (int j = 0; j < MP_RH; j++) { cb[j * MP_CW] = oc; cb[j * MP_CW + MP_CW - 1] = oc; }
+  }
+  microBlit(x, y, MP_CW, MP_RH, cb);
+}
+static void mapDrawLabels() {
+  static uint16_t lb[24 * 8];
+  for (int c = 0; c < MAP_COLS; c++) {                 // ป้าย TPS ครบทุกคอลัมน์ (คู่อยู่แถวบน คี่อยู่แถวล่าง)
+    char b[8]; snprintf(b, sizeof b, "%.1f", MAP_TPS_AXIS[c]);
+    int w = microW(b), xc = MP_X0 + c * MP_CW + MP_CW / 2, y = (c & 1) ? MP_LBL_B : MP_LBL_A;
+    uint16_t col = (c == mapCurGc) ? N_GRN : ((c & 1) ? C_DIM : C_TXT);
+    for (int i = 0; i < w * 7; i++) lb[i] = N_BG;
+    microPut(lb, w, 7, 0, 0, b, col);
+    microBlit(xc - w / 2, y, w, 7, lb);
+    if (!(c & 1)) tft.drawFastVLine(xc, MP_LBL_A + 8, MP_Y0 - MP_LBL_A - 8, dimc(N_LBLUE, 2));   // เส้นนำของป้ายแถวบน
+  }
+  static uint16_t rb[17 * 10];
+  for (int gi = 0; gi < MP_NROWS; gi++) {              // ป้าย RPM (หน่วยพัน)
+    char b[6]; snprintf(b, sizeof b, "%d", mapRowRpm(gi) / 1000);
+    int w = microW(b), y = MP_Y0 + (MP_NROWS - 1 - gi) * MP_RH;
+    for (int i = 0; i < 17 * 10; i++) rb[i] = N_BG;
+    microPut(rb, 17, 10, 16 - w, 1, b, gi == mapCurGi ? N_YEL : C_TXT);
+    microBlit(0, y, 17, 10, rb);
+  }
+}
+static void mapDrawTable() {
+  tft.fillRect(0, 38, SCREEN_W, MP_STAT_Y - 38, N_BG);
+  mapDrawLabels();
+  for (int gi = 0; gi < MP_NROWS; gi++) for (int gc = 0; gc < MAP_COLS; gc++) mapCell(gi, gc);
+}
+
+// ---- ส่วนหัว / แท็บ / ปุ่ม ----
+static void nButton(int x, int y, int w, int h, const char* label, uint16_t fg, uint16_t fill, uint16_t acc) {
+  chamfer2(x, y, w, h, 6, acc, fill);
+  txt(x + w / 2, y + h / 2, label, 2, fg, fill, MC_DATUM);
+}
+static void mapHeaderStatic() {
+  tft.fillRect(0, 0, SCREEN_W, 20, N_BG);
+  tft.fillTriangle(3, 19, 11, 2, 61, 2, N_YEL);
+  tft.fillTriangle(3, 19, 61, 2, 53, 19, N_YEL);
+  txt(32, 11, "GRID", 2, C_BG, N_YEL, MC_DATUM);
+  fMpHdr.set(262, 10, 54, 1, MR_DATUM, N_BG);  fMpHdr.reset();
+  fMpBat.set(316, 10, 40, 1, MR_DATUM, N_BG);  fMpBat.reset();
+  fMpRec.set(72, 10, 80, 2, ML_DATUM, N_BG);   fMpRec.reset();
+}
+static void mapTabs() {
+  static const char* N[3] = {"INJ", "AFR", "IGT"};
+  for (int i = 0; i < 3; i++) {
+    bool sel = i == mapTab;
+    int x = MP_BX[i];
+    tft.fillRect(x, MP_TABS_Y, MP_BW, 17, N_PANEL);
+    tft.fillRect(x, MP_TABS_Y + 15, MP_BW, 2, sel ? N_GRN : dimc(N_BLUE, 2));
+    txt(x + MP_BW / 2, MP_TABS_Y + 7, N[i], 2, sel ? N_GRN : C_TXT, N_PANEL, MC_DATUM);
+  }
+}
+static void mapButtons() {
+  nButton(MP_KX[0], MP_BTN_Y, MP_KW[0], MP_BTN_H, "< BACK", C_TXT, N_PANEL, K_BLUE);
+  nButton(MP_KX[1], MP_BTN_Y, MP_KW[1], MP_BTN_H, "SAVE", C_TXT, N_PANEL, K_BLUE);
+  if (mapArmClr) nButton(MP_KX[2], MP_BTN_Y, MP_KW[2], MP_BTN_H, "SURE?", C_BG, K_ORG, K_ORG);
+  else           nButton(MP_KX[2], MP_BTN_Y, MP_KW[2], MP_BTN_H, "CLEAR", C_TXT, N_PANEL, K_BLUE);
+  nButton(MP_KX[3], MP_BTN_Y, MP_KW[3], MP_BTN_H, g_mapRec ? "REC  ON" : "REC", C_TXT, g_mapRec ? rgb565(150, 10, 25) : N_PANEL, K_RED);
+}
+static void mapSetMsg(const char* m, uint16_t c) {
+  snprintf(mapMsg, sizeof mapMsg, "%s", m); mapMsgCol = c; mapMsgUntil = millis() + 3500; fMpMsg.reset();
+}
+
+static void recToggle() {
+  g_mapRec = !g_mapRec; mapRecOk = false; savePrefs();
+  if (g_mapRec) mapSetMsg("RECORDING AFR / INJ / IGT", C_RED);
+  else { bool ok = mapSave(); mapSetMsg(ok ? "REC OFF - SAVED" : "REC OFF - SAVE FAILED", ok ? N_GRN : C_RED); }
+}
+
+static void mapEnter() {
+  tft.fillScreen(N_BG);
+  mapHeaderStatic(); mapTabs(); mapButtons();
+  fMpState.set(4, MP_STAT_Y, 48, 1, TL_DATUM, N_BG);
+  fMpLive.set(56, MP_STAT_Y, 116, 1, TL_DATUM, N_BG);
+  fMpCell.set(176, MP_STAT_Y, 90, 1, TL_DATUM, N_BG);
+  fMpMsg.set(4, MP_STAT_Y + 11, 262, 1, TL_DATUM, N_BG);
+  fMpPts.set(316, MP_STAT_Y + 11, 64, 1, TR_DATUM, N_BG);
+  fMpState.reset(); fMpCell.reset(); fMpLive.reset(); fMpPts.reset(); fMpMsg.reset();
+  mapArmClr = 0; mapSelGi = mapSelGc = -1; mapDirtyAll = true; mapCurGi = mapCurGc = -1; mapSeenSeq = mapRecSeq();
+}
+static void mapLeave() { mapArmClr = 0; }
+
+// ---- ตำแหน่งสดบนกริด ----
+static bool mapLiveGroup(int& gi, int& gc) {
+  int r = mapRowOfRpm((float)D.rpm);
+  bool live = (ST == ECU_ONLINE || ST == ECU_DEMO);
+  if (r < 0 || !live) return false;
+  gi = (MAP_RPM_MIN + r * MAP_RPM_STEP) / MP_SPAN - MAP_RPM_MIN / MP_SPAN;
+  gc = mapColOfTps(D.tpsPct);
+  return gi >= 0 && gi < MP_NROWS;
+}
+
+static void mapUpdate(uint32_t now) {
+  int gi = -1, gc = -1;
+  if (!mapLiveGroup(gi, gc)) { gi = -1; gc = -1; }
+  if (mapArmClr && now > mapArmUntil) { mapArmClr = 0; mapButtons(); }
+  if (mapSelGi >= 0 && now > mapSelUntil) { int og = mapSelGi, oc = mapSelGc; mapSelGi = mapSelGc = -1; mapCell(og, oc); }
+
+  if (mapDirtyAll) {
+    mapDirtyAll = false; mapCurGi = gi; mapCurGc = gc; mapSeenSeq = mapRecSeq();
+    mapDrawTable();
+  } else {
+    bool moved = (gi != mapCurGi || gc != mapCurGc);
+    int og = mapCurGi, oc = mapCurGc;
+    if (moved) {
+      mapCurGi = gi; mapCurGc = gc;
+      if (og >= 0) mapCell(og, oc);
+      if (gi >= 0) mapCell(gi, gc);
+      mapDrawLabels();
+    }
+    uint32_t sq = mapRecSeq();
+    if (sq != mapSeenSeq) {                      // มีการบันทึกใหม่ -> วาดช่องนั้นใหม่
+      mapSeenSeq = sq;
+      int lr = mapLastRow(), lc = mapLastCol();
+      if (lr >= 0) {
+        mapCell((MAP_RPM_MIN + lr * MAP_RPM_STEP) / MP_SPAN - MAP_RPM_MIN / MP_SPAN, lc);
+        if (mapCurGi >= 0) mapCell(mapCurGi, mapCurGc);   // ให้กรอบเคอร์เซอร์อยู่บนสุดเสมอ
+      } else mapDirtyAll = true;                          // หลัง CLEAR / LOAD
+    }
+  }
+
+  // ---- ส่วนหัว ----
+  bool live = (ST == ECU_ONLINE || ST == ECU_DEMO);
+  const char* hs = ST == ECU_DEMO ? "DEMO" : (ST == ECU_ONLINE ? "ONLINE" : (ST == ECU_CONNECTING ? "CONNECT" : "OFF"));
+  uint16_t hc = ST == ECU_DEMO ? C_CYAN : (ST == ECU_ONLINE ? N_GRN : (ST == ECU_CONNECTING ? C_YEL : C_DIM));
+  static uint16_t lastDot = 0;
+  if (hc != lastDot) { tft.fillCircle(216, 10, 3, hc); lastDot = hc; }
+  fMpHdr.draw(hs, hc);
+  char b[80];
+  if (live) { snprintf(b, sizeof b, "%.1fV", sBatt); fMpBat.draw(b, colBatt(sBatt)); } else fMpBat.draw("--.-V", C_DIM);
+  if (g_mapRec) { snprintf(b, sizeof b, "%s REC", ((now / 500) & 1) ? "*" : " "); fMpRec.draw(b, C_RED); } else fMpRec.draw("", N_BG);
+
+  // ---- สถานะ ----
+  const char* st; uint16_t sc;
+  if (!live) { st = "NO ECU"; sc = C_ORG; }
+  else if (g_mapRec) { st = mapRecOk ? "REC" : "WAIT"; sc = mapRecOk ? C_RED : C_YEL; }
+  else { st = "READY"; sc = N_GRN; }
+  fMpState.draw(st, sc);
+  snprintf(b, sizeof b, "RPM %u TPS %.1f", D.rpm, D.tpsPct);
+  fMpLive.draw(b, C_TXT);
+  snprintf(b, sizeof b, "CEL %lu/%lu", (unsigned long)mapCells(), (unsigned long)((uint32_t)MAP_ROWS * MAP_COLS));
+  fMpCell.draw(b, C_TXT);
+  if (mapMsg[0] && now < mapMsgUntil) { fMpMsg.draw(mapMsg, mapMsgCol); fMpPts.draw("", N_BG); }
+  else if (mapSelGi >= 0) { fMpMsg.draw(mapInfo, N_YEL); fMpPts.draw("", N_BG); }
+  else {
+    static const char* LEG[3] = {"INJ ms x10  ROW RPM/1000  COL TPS%", "AFR x10  ROW RPM/1000  COL TPS%", "IGT deg x10  ROW RPM/1000  COL TPS%"};
+    fMpMsg.draw(LEG[mapTab], dimc(N_LBLUE, 0));
+    snprintf(b, sizeof b, "PTS %lu", (unsigned long)mapPoints());
+    fMpPts.draw(b, C_TXT);
+  }
+}
+
+// ---- ทัช ----
+static bool mapSwipe(int dx, int dy, int x0, int y0) { return false; }   // ไม่มีการเลื่อนแล้ว: ปัดซ้ายขวา = เปลี่ยนหน้า
+
+static void mapSelectCell(int gi, int gc) {
+  static const char* NM[3] = {"INJ", "AFR", "IGT"};
+  int r0, r1; mapRowRange(gi, r0, r1);
+  MapAgg a; mapAggregate(r0, r1, gc, gc, a);
+  int lo = mapRowRpm(gi), hi = lo + MP_SPAN - MAP_RPM_STEP; if (hi > MAP_RPM_MAX) hi = MAP_RPM_MAX; if (lo < MAP_RPM_MIN) lo = MAP_RPM_MIN;
+  if (a.cnt) {
+    char v[10]; mapFmtReal(v, sizeof v, a.v[MP_VIDX[mapTab]]);
+    snprintf(mapInfo, sizeof mapInfo, "RPM %d-%d  TPS %.1f  %s %s  N=%u", lo, hi, MAP_TPS_AXIS[gc], NM[mapTab], v, (unsigned)a.cnt);
+  } else snprintf(mapInfo, sizeof mapInfo, "RPM %d-%d  TPS %.1f  NO DATA", lo, hi, MAP_TPS_AXIS[gc]);
+  int og = mapSelGi, oc = mapSelGc;
+  mapSelGi = gi; mapSelGc = gc; mapSelUntil = millis() + 8000;
+  if (og >= 0) mapCell(og, oc);
+  mapCell(gi, gc);
+}
+static bool mapTap(int x, int y) {
+  // แท็บ
+  if (y >= MP_TABS_Y && y < MP_TABS_Y + 17) {
+    for (int i = 0; i < 3; i++) if (hit(x, y, MP_BX[i], MP_TABS_Y, MP_BW, 17)) {
+      if (mapTab != i) { mapTab = i; mapSelGi = mapSelGc = -1; mapTabs(); mapDirtyAll = true; }
+      return true;
+    }
+    return true;
+  }
+  // ป้าย GRID (มุมซ้ายบน) -> ส่ง CSV ออก Serial
+  if (y < 20 && x < 64) { mapSetMsg("CSV -> SERIAL 115200", C_CYAN); mapDumpCsv(Serial); mapSetMsg("CSV SENT", N_GRN); return true; }
+  // แตะที่ช่องตาราง = ดูค่าของช่องนั้น
+  if (x >= MP_X0 && x < MP_X0 + MP_CW * MAP_COLS && y >= MP_Y0 && y < MP_Y0 + MP_RH * MP_NROWS) {
+    mapSelectCell(MP_NROWS - 1 - (y - MP_Y0) / MP_RH, (x - MP_X0) / MP_CW);
+    return true;
+  }
+  if (hit(x, y, MP_KX[0], MP_BTN_Y, MP_KW[0], MP_BTN_H)) { gotoPage(mapPrevPage == P_GRID ? P_HOME : mapPrevPage); return true; }   // BACK
+  if (hit(x, y, MP_KX[1], MP_BTN_Y, MP_KW[1], MP_BTN_H)) {        // SAVE
+    mapSetMsg("SAVING...", C_YEL); bool ok = mapSave();
+    char b[32]; snprintf(b, sizeof b, ok ? "SAVED %lu PTS" : "SAVE FAILED", (unsigned long)mapPoints());
+    mapSetMsg(b, ok ? N_GRN : C_RED); return true;
+  }
+  if (hit(x, y, MP_KX[2], MP_BTN_Y, MP_KW[2], MP_BTN_H)) {        // CLEAR (กด 2 ครั้ง)
+    if (mapArmClr) { mapArmClr = 0; mapClear(true); mapDirtyAll = true; mapButtons(); mapSetMsg("MAP CLEARED", C_ORG); }
+    else { mapArmClr = 1; mapArmUntil = millis() + 3000; mapButtons(); }
+    return true;
+  }
+  if (hit(x, y, MP_KX[3], MP_BTN_Y, MP_KW[3], MP_BTN_H)) { recToggle(); mapButtons(); return true; }   // REC
+  return false;
+}
+
+
+// ============================================================
+//  PAGE 6 : MENU
+// ============================================================
+static void menuEnter() {
+  tft.fillScreen(N_BG);
+  txt(160, 12, "MENU", 2, C_TXT, N_BG, MC_DATUM);
+  langButton(256, 3, 60, 20);
+  static const char* L[7] = {"HOME", "MAP GRID", "PLOT", "DATA", "DTC", "SYS", "< BACK"};
+  static const char* LT[7] = {"หน้าหลัก", "กริดแมพ", "กราฟ", "ข้อมูล", "รหัสเสีย (DTC)", "ระบบ", "< กลับ"};
+  for (int i = 0; i < 7; i++) {
+    bool back = i == 6;                                   // ปุ่ม BACK เต็มความกว้างแถวล่างสุด
+    int x = back ? 5 : 5 + (i % 2) * 158, y = 28 + (i / 2) * 52, w = back ? 310 : 152;
+    chamfer2(x, y, w, 46, 9, back ? K_RED : K_BLUE);
+    txt(x + w / 2, y + 23, g_lang ? LT[i] : L[i], 2, C_TXT, N_PANEL, MC_DATUM);
+  }
+}
+static void menuUpdate(uint32_t) {}
+static void menuLeave() {}
+static bool menuTap(int x, int y) {
+  if (langTap(x, y, 256, 3, 60, 20)) return true;
+  if (y < 28) return false;
+  int col = x < 160 ? 0 : 1, row = (y - 28) / 52;
+  if (row > 3 || (y - 28) % 52 > 46) return false;
+  int i = row == 3 ? 6 : row * 2 + col;
+  static const int T[7] = {P_HOME, P_GRID, P_PLOT, P_DATA, P_DTC, P_SYS, -1};
+  if (T[i] < 0) gotoPage(mapPrevPage == P_MENU ? P_HOME : mapPrevPage); else gotoPage(T[i]);
+  return true;
+}
+
+
+// ============================================================
+//  PAGE 3 : PLOT  (กราฟ real-time 5 ช่อง, แตะเพื่อเปิด/ปิดเส้น)
+// ============================================================
+constexpr int PLOT_X = 10, PLOT_Y = 64, PLOT_W = 300, PLOT_H = 130;
+static TFT_eSprite* plotSpr = nullptr;
+static Field fPlot[HCH];
+static uint32_t plotT = 0;
+
+static void plotButtons() {
+  for (int i = 0; i < HCH; i++) {
+    int x = 4 + i * 63;
+    uint16_t c = chOn[i] ? CH_COL[i] : dimc(CH_COL[i], 3);
+    tft.fillRoundRect(x, 24, 60, 34, 4, C_PANEL);
+    tft.drawRoundRect(x, 24, 60, 34, 4, chOn[i] ? CH_COL[i] : C_EDGE);
+    txt(x + 5, 29, CH_NAME[i], 1, c, C_PANEL, TL_DATUM);
+    fPlot[i].set(x + 55, 47, 50, 2, MR_DATUM, C_PANEL);
+    fPlot[i].reset();
+  }
+}
+static void plotEnter() {
+  tft.fillRect(0, CT, SCREEN_W, CH, C_BG);
+  plotButtons();
+  if (!plotSpr) {
+    plotSpr = new TFT_eSprite(&tft);
+    plotSpr->setColorDepth(16);
+    if (!plotSpr->createSprite(PLOT_W, PLOT_H)) {
+      plotSpr->setColorDepth(8);
+      if (!plotSpr->createSprite(PLOT_W, PLOT_H)) { delete plotSpr; plotSpr = nullptr; }
+    }
+  }
+  if (!plotSpr) txt(160, 120, "NO MEMORY FOR GRAPH", 2, C_RED, C_BG, MC_DATUM);
+  txt(PLOT_X, PLOT_Y + PLOT_H + 6, "-15 s", 1, C_DIM, C_BG, TL_DATUM);
+  txt(PLOT_X + PLOT_W, PLOT_Y + PLOT_H + 6, "now", 1, C_DIM, C_BG, TR_DATUM);
+  plotT = 0;
+}
+static void plotUpdate(uint32_t now) {
+  char b[16];
+  float vals[HCH] = {sRpm, sTps, sAfr, D.spark, D.injDuty};
+  static uint32_t legT = 0;
+  if (now - legT > 150) {
+    legT = now;
+    for (int i = 0; i < HCH; i++) {
+      if (i == 0) snprintf(b, sizeof b, "%d", (int)(vals[i] + 0.5f));
+      else if (i == 1) snprintf(b, sizeof b, "%d", (int)(vals[i] + 0.5f));
+      else snprintf(b, sizeof b, "%.1f", vals[i]);
+      fPlot[i].draw(b, chOn[i] ? CH_COL[i] : dimc(CH_COL[i], 2));
+    }
+  }
+  if (!plotSpr) return;
+  plotSpr->fillSprite(C_BG);
+  for (int k = 1; k < 4; k++) plotSpr->drawFastHLine(0, PLOT_H * k / 4, PLOT_W, C_GRID);
+  for (int x = 0; x < PLOT_W; x += 60) plotSpr->drawFastVLine(x, 0, PLOT_H, C_GRID);
+  plotSpr->drawRect(0, 0, PLOT_W, PLOT_H, C_EDGE);
+  for (int c = 0; c < HCH; c++) {
+    if (!chOn[c]) continue;
+    int py = 0, y = 0;
+    for (int i = 0; i < HN; i++) {
+      int idx = (histHead + i) % HN;
+      y = PLOT_H - 3 - (int)hist[c][idx] * (PLOT_H - 6) / 255;
+      if (i > 0) {
+        plotSpr->drawLine(i - 1, py, i, y, CH_COL[c]);
+        plotSpr->drawLine(i - 1, py + 1, i, y + 1, CH_COL[c]);
+      }
+      py = y;
+    }
+  }
+  plotSpr->pushSprite(PLOT_X, PLOT_Y);
+}
+static bool plotTap(int x, int y) {
+  if (y >= 24 && y < 58) {
+    int i = (x - 4) / 63;
+    if (i >= 0 && i < HCH) { chOn[i] = !chOn[i]; plotButtons(); return true; }
+  }
+  return false;
+}
+static void plotLeave() {
+  if (plotSpr) { plotSpr->deleteSprite(); delete plotSpr; plotSpr = nullptr; }
+}
+
+// ============================================================
+//  PAGE 4 : DATA  (ค่าทั้งหมดที่แปลงแล้ว 20 รายการ)
+// ============================================================
+constexpr int DROWS = 10;
+constexpr int DROW_H = 19;
+static const char* DLABEL[20] = {
+  "RPM", "TPS V", "TPS %", "TPS 100%", "TPS RAW", "EOT V", "EOT C", "BATT V", "INJ ms", "INJ %",
+  "SPARK", "LTFT", "STFT", "O2 V", "AFR", "MODE", "GEAR", "SCS", "PUMP", "ECU"};
+static Field fData[20];
+static uint32_t dataT = 0;
+
+static void dataEnter() {
+  tft.fillRect(0, CT, SCREEN_W, CH, C_BG);
+  tft.drawFastVLine(160, CT, CH, C_EDGE);
+  for (int i = 0; i < 20; i++) {
+    int col = i / DROWS, row = i % DROWS;
+    int x = col * 161, y = CT + row * DROW_H;
+    txt(x + 5, y + DROW_H / 2, DLABEL[i], 2, C_DIM, C_BG, ML_DATUM);
+    tft.drawFastHLine(x + 2, y + DROW_H - 1, 156, C_GRID);
+    if (i == 19) fData[i].set(x + 156, y + DROW_H / 2, 100, 1, MR_DATUM);
+    else fData[i].set(x + 156, y + DROW_H / 2, 78, 2, MR_DATUM);
+  }
+  dataT = 0;
+}
+static void dataUpdate(uint32_t now) {
+  if (now - dataT < 90) return;
+  dataT = now;
+  char b[24];
+  uint16_t w = C_TXT;
+  snprintf(b, sizeof b, "%u", D.rpm);            fData[0].draw(b, colRpm(D.rpm));
+  snprintf(b, sizeof b, "%.2f", D.tpsV);         fData[1].draw(b, w);
+  snprintf(b, sizeof b, "%.1f", D.tpsPct);       fData[2].draw(b, w);
+  snprintf(b, sizeof b, "%.1f", D.tps100);       fData[3].draw(b, C_CYAN);
+  snprintf(b, sizeof b, "%u", D.tpsRaw);         fData[4].draw(b, w);
+  snprintf(b, sizeof b, "%.2f", D.eotV);         fData[5].draw(b, w);
+  snprintf(b, sizeof b, "%.0f", D.eotC);         fData[6].draw(b, colEot(D.eotC));
+  snprintf(b, sizeof b, "%.1f", D.batt);         fData[7].draw(b, colBatt(D.batt));
+  snprintf(b, sizeof b, "%.2f", D.injMs);        fData[8].draw(b, w);
+  snprintf(b, sizeof b, "%.1f", D.injDuty);      fData[9].draw(b, w);
+  snprintf(b, sizeof b, "%.1f", D.spark);        fData[10].draw(b, w);
+  snprintf(b, sizeof b, "%.3f", D.ltft);         fData[11].draw(b, w);
+  snprintf(b, sizeof b, "%.3f", D.stft);         fData[12].draw(b, w);
+  snprintf(b, sizeof b, "%.2f", D.o2V);          fData[13].draw(b, w);
+  snprintf(b, sizeof b, "%.1f", D.afr);          fData[14].draw(b, colAfr(D.afr));
+  snprintf(b, sizeof b, "%u", D.mode);           fData[15].draw(b, w);
+  fData[16].draw(D.neutral ? "NEUTRAL" : "IN GEAR", D.neutral ? C_GREEN : C_TXT);
+  fData[17].draw(D.scsOn ? "ON" : "OFF", D.scsOn ? C_GREEN : C_DIM);
+  fData[18].draw(D.pump ? "ON" : "OFF", D.pump ? C_GREEN : C_DIM);
+  ecuPartName(D.partCode, b, sizeof b);          fData[19].draw(b, C_YEL);
+}
+static bool dataTap(int, int) { return false; }
+static void dataLeave() {}
+
+// ============================================================
+//  PAGE 5 : DTC
+// ============================================================
+static bool dtcHist = false;
+static int dtcScroll = 0;
+static DtcInfo dtcInfo;
+static uint32_t dtcPollT = 0;
+static uint32_t dtcSig = 0xFFFFFFFF;
+static uint8_t armed = 0;               // 1 = CLEAR, 2 = RESET
+static uint32_t armedUntil = 0;
+static char dtcMsg[40] = "";
+static uint16_t dtcMsgCol = C_DIM;
+static CmdResult pDtc = CMD_NONE, pClr = CMD_NONE, pRst = CMD_NONE;
+static Field fDtcMsg;
+
+static void dtcTabs() {
+  button(4, 24, 152, 22, "CURRENT", dtcHist ? C_DIM : C_TXT, dtcHist ? C_PANEL : dimc(C_RED, 2), dtcHist ? C_EDGE : C_RED);
+  button(164, 24, 152, 22, "HISTORY", dtcHist ? C_TXT : C_DIM, dtcHist ? dimc(C_YEL, 2) : C_PANEL, dtcHist ? C_YEL : C_EDGE);
+}
+static void dtcButtons() {
+  button(4, 184, 100, 26, "READ", C_TXT, dimc(C_CYAN, 2), C_CYAN);
+  if (armed == 1) button(110, 184, 100, 26, "CONFIRM?", C_BG, C_ORG, C_ORG);
+  else button(110, 184, 100, 26, "CLEAR", C_TXT, dimc(C_ORG, 2), C_ORG);
+  if (armed == 2) button(216, 184, 100, 26, "CONFIRM?", C_BG, C_ORG, C_ORG);
+  else button(216, 184, 100, 26, "RESET ECU", C_TXT, dimc(C_RED, 2), C_RED);
+}
+static const DtcList& dtcCur() { return dtcHist ? dtcInfo.hist : dtcInfo.cur; }
+
+static void dtcDrawList() {
+  tft.fillRect(0, 50, SCREEN_W, 114, C_BG);
+  const DtcList& L = dtcCur();
+  if (!dtcInfo.valid) {
+    txt(160, 107, "PRESS READ", 4, C_DIM, C_BG, MC_DATUM);
+    return;
+  }
+  if (L.count == 0) {
+    txt(160, 107, "NO CODES", 4, C_GREEN, C_BG, MC_DATUM);
+    return;
+  }
+  for (int r = 0; r < 6; r++) {
+    int i = dtcScroll + r;
+    if (i >= L.count) break;
+    char code[8]; const char* desc;
+    dtcFormat(L.code[i], code, &desc);
+    int y = 50 + r * 19;
+    txt(12, y + 9, code, 2, dtcHist ? C_YEL : C_RED, C_BG, ML_DATUM);
+    txt(78, y + 9, desc, 2, C_TXT, C_BG, ML_DATUM);
+    tft.drawFastHLine(8, y + 18, 270, C_GRID);
+  }
+  if (L.count > 6) {
+    tft.fillTriangle(298, 56, 286, 76, 310, 76, dtcScroll > 0 ? C_CYAN : C_EDGE);
+    tft.fillTriangle(298, 156, 286, 136, 310, 136, (dtcScroll + 6 < L.count) ? C_CYAN : C_EDGE);
+  }
+}
+static void dtcSetMsg(const char* m, uint16_t c) {
+  snprintf(dtcMsg, sizeof dtcMsg, "%s", m); dtcMsgCol = c;
+  tft.fillRect(2, 164, 316, 19, C_BG);      // ล้างข้อความเดิม (ตัวอักษรมีหาง g/y/p)
+  fDtcMsg.reset();
+}
+static void dtcEnter() {
+  tft.fillRect(0, CT, SCREEN_W, CH, C_BG);
+  dtcTabs(); dtcButtons();
+  fDtcMsg.set(160, 174, 316, 2, MC_DATUM);
+  dtcSig = 0xFFFFFFFF; dtcPollT = 0; armed = 0;
+  pDtc = ecuDtcStatus(); pClr = ecuClearStatus(); pRst = ecuResetStatus();
+  ecuGetDtc(dtcInfo);
+}
+static void dtcUpdate(uint32_t now) {
+  if (now - dtcPollT > 250) { dtcPollT = now; ecuGetDtc(dtcInfo); }
+  if (armed && now > armedUntil) { armed = 0; dtcButtons(); }
+
+  CmdResult d = ecuDtcStatus(), c = ecuClearStatus(), r = ecuResetStatus();
+  char b[40];
+  if (d != pDtc) {
+    pDtc = d;
+    if (d == CMD_PENDING) dtcSetMsg("Reading codes...", C_CYAN);
+    else if (d == CMD_OK) { snprintf(b, sizeof b, "Read OK: %u now / %u history", dtcInfo.cur.count, dtcInfo.hist.count); dtcSetMsg(b, C_GREEN); }
+    else if (d == CMD_FAIL) dtcSetMsg("Read failed (no ECU reply)", C_RED);
+  }
+  if (c != pClr) {
+    pClr = c;
+    if (c == CMD_PENDING) dtcSetMsg("Clearing codes...", C_CYAN);
+    else if (c == CMD_OK) dtcSetMsg("Codes cleared OK", C_GREEN);
+    else if (c == CMD_FAIL) dtcSetMsg("Clear failed", C_RED);
+  }
+  if (r != pRst) {
+    pRst = r;
+    if (r == CMD_PENDING) dtcSetMsg("Resetting ECU...", C_CYAN);
+    else if (r == CMD_OK) dtcSetMsg("ECU reset OK", C_GREEN);
+    else if (r == CMD_FAIL) dtcSetMsg("Reset failed", C_RED);
+  }
+  fDtcMsg.draw(dtcMsg, dtcMsgCol);
+
+  const DtcList& L = dtcCur();
+  uint32_t sig = (dtcInfo.valid ? 1 : 0) | (L.count << 1) | (dtcScroll << 8) | ((dtcHist ? 1 : 0) << 12);
+  for (int i = 0; i < L.count; i++) sig = sig * 31 + L.code[i];
+  if (sig != dtcSig) { dtcSig = sig; dtcDrawList(); }
+}
+static bool dtcTap(int x, int y) {
+  bool live = (ST == ECU_ONLINE || ST == ECU_DEMO);
+  if (hit(x, y, 4, 24, 152, 22))   { dtcHist = false; dtcScroll = 0; dtcTabs(); dtcSig = 0xFFFFFFFF; return true; }
+  if (hit(x, y, 164, 24, 152, 22)) { dtcHist = true;  dtcScroll = 0; dtcTabs(); dtcSig = 0xFFFFFFFF; return true; }
+  if (hit(x, y, 280, 50, 40, 55)) { if (dtcScroll > 0) { dtcScroll--; dtcSig = 0xFFFFFFFF; } return true; }
+  if (hit(x, y, 280, 110, 40, 55)) { if (dtcScroll + 6 < dtcCur().count) { dtcScroll++; dtcSig = 0xFFFFFFFF; } return true; }
+  if (hit(x, y, 4, 184, 100, 26)) {
+    armed = 0; dtcButtons();
+    if (!live) dtcSetMsg("ECU not connected", C_RED); else ecuReadDtc();
+    return true;
+  }
+  if (hit(x, y, 110, 184, 100, 26)) {
+    if (!live) { dtcSetMsg("ECU not connected", C_RED); return true; }
+    if (armed == 1) { armed = 0; dtcButtons(); ecuClearDtc(); }
+    else { armed = 1; armedUntil = millis() + 3000; dtcButtons(); }
+    return true;
+  }
+  if (hit(x, y, 216, 184, 100, 26)) {
+    if (!live) { dtcSetMsg("ECU not connected", C_RED); return true; }
+    if (armed == 2) { armed = 0; dtcButtons(); ecuResetEcu(); }
+    else { armed = 2; armedUntil = millis() + 3000; dtcButtons(); }
+    return true;
+  }
+  return false;
+}
+static void dtcLeave() { armed = 0; }
+
+// ============================================================
+//  PAGE 6 : SYS
+// ============================================================
+static Field fSys[7];
+static uint32_t sysT = 0;
+static const char* SYSL[7] = {"STATUS", "ECU ID", "FLASH COUNT", "UPDATE RATE", "ERRORS", "FREE HEAP", "UPTIME"};
+
+constexpr int SYS_LY = 140;                 // แถว LIGHT (ปุ่ม - + และสลับภาษา)
+constexpr int SYS_ALERT_Y = 162;            // ปุ่ม ALERT SETTINGS
+static void sysBright() {
+  tft.fillRoundRect(100, SYS_LY + 2, 124, 16, 3, C_PANEL);
+  tft.drawRoundRect(100, SYS_LY + 2, 124, 16, 3, C_EDGE);
+  int w = (g_bri - 10) * 118 / 245;
+  tft.fillRoundRect(103, SYS_LY + 5, w < 1 ? 1 : w, 10, 2, C_YEL);
+}
+static void sysButtons() {
+  button(4, 184, 100, 26, ecuDemo() ? "DEMO: ON" : "DEMO: OFF", C_TXT, ecuDemo() ? dimc(C_PURP, 1) : C_PANEL, ecuDemo() ? C_PURP : C_EDGE);
+  button(110, 184, 100, 26, "RECONNECT", C_TXT, dimc(C_CYAN, 2), C_CYAN);
+  button(216, 184, 100, 26, ecuEnabled() ? "ECU: ON" : "ECU: OFF", C_TXT, ecuEnabled() ? dimc(C_GREEN, 2) : dimc(C_RED, 2), ecuEnabled() ? C_GREEN : C_RED);
+}
+static void sysEnter() {
+  tft.fillRect(0, CT, SCREEN_W, CH, C_BG);
+  for (int i = 0; i < 7; i++) {
+    int y = 24 + i * 16;
+    txt(8, y + 8, SYSL[i], 2, C_DIM, C_BG, ML_DATUM);
+    fSys[i].set(312, y + 8, 190, 2, MR_DATUM);
+  }
+  txt(8, SYS_LY + 10, "LIGHT", 2, C_DIM, C_BG, ML_DATUM);
+  button(62, SYS_LY, 34, 20, "-", C_TXT, C_PANEL, C_EDGE);
+  button(228, SYS_LY, 34, 20, "+", C_TXT, C_PANEL, C_EDGE);
+  langButton(270, SYS_LY, 46, 20);
+  nButton(4, SYS_ALERT_Y, 154, 18, "ALERT SETTINGS", C_TXT, N_PANEL, K_ORG);
+  nButton(162, SYS_ALERT_Y, 154, 18, "PHONE LINK", C_TXT, N_PANEL, K_BLUE);
+  sysBright(); sysButtons(); sysT = 0;
+}
+static void sysUpdate(uint32_t now) {
+  if (now - sysT < 400) return;
+  sysT = now;
+  char b[32];
+  const char* s = ST == ECU_ONLINE ? "ONLINE" : ST == ECU_CONNECTING ? "CONNECTING" : ST == ECU_DEMO ? "DEMO MODE" : "DISABLED";
+  uint16_t c = ST == ECU_ONLINE ? C_GREEN : ST == ECU_CONNECTING ? C_YEL : ST == ECU_DEMO ? C_PURP : C_DIM;
+  fSys[0].draw(s, c);
+  ecuPartName(D.partCode, b, sizeof b); fSys[1].draw(D.hasId ? b : "--", C_TXT);
+  if (D.hasFlash) snprintf(b, sizeof b, "%u", D.flashCount); else snprintf(b, sizeof b, "--");
+  fSys[2].draw(b, C_TXT);
+  snprintf(b, sizeof b, "%.1f Hz", ecuRateHz()); fSys[3].draw(b, C_TXT);
+  snprintf(b, sizeof b, "%lu", (unsigned long)ecuErrors()); fSys[4].draw(b, ecuErrors() ? C_ORG : C_TXT);
+  snprintf(b, sizeof b, "%u KB", (unsigned)(ESP.getFreeHeap() / 1024)); fSys[5].draw(b, C_TXT);
+  uint32_t sec = now / 1000;
+  snprintf(b, sizeof b, "%02lu:%02lu:%02lu", (unsigned long)(sec / 3600), (unsigned long)(sec / 60 % 60), (unsigned long)(sec % 60));
+  fSys[6].draw(b, C_TXT);
+}
+static void savePrefs() {
+  prefs.putUChar("bri", g_bri);
+  prefs.putUChar("pg2", (uint8_t)g_page);
+  prefs.putBool("demo", ecuDemo());
+  prefs.putBool("ecu", ecuEnabled());
+  prefs.putUChar("lang", g_lang);
+  prefs.putBool("rec", g_mapRec);
+  prefs.putBool("tOn", g_tempOn);
+  prefs.putUChar("tC", g_tempC);
+  prefs.putBool("sOn", g_shiftOn);
+  prefs.putUShort("sR", g_shiftRpm);
+  prefs.putUChar("spd", g_spdSrc);
+}
+static bool sysTap(int x, int y) {
+  if (langTap(x, y, 270, SYS_LY, 46, 20)) return true;
+  if (hit(x, y, 4, SYS_ALERT_Y, 154, 18)) { gotoPage(P_ALERT); return true; }
+  if (hit(x, y, 162, SYS_ALERT_Y, 154, 18)) { gotoPage(P_PHONE); return true; }
+  if (hit(x, y, 56, SYS_LY - 6, 46, 26)) { setBrightness(g_bri > 35 ? g_bri - 25 : 10); sysBright(); savePrefs(); return true; }
+  if (hit(x, y, 222, SYS_LY - 6, 46, 26)) { setBrightness(g_bri < 230 ? g_bri + 25 : 255); sysBright(); savePrefs(); return true; }
+  if (hit(x, y, 100, SYS_LY - 6, 124, 26)) { int v = 10 + (x - 103) * 245 / 118; setBrightness((uint8_t)constrain(v, 10, 255)); sysBright(); savePrefs(); return true; }
+  if (hit(x, y, 4, 184, 100, 26))  { ecuSetDemo(!ecuDemo()); sysButtons(); savePrefs(); return true; }
+  if (hit(x, y, 110, 184, 100, 26)) { ecuReconnect(); return true; }
+  if (hit(x, y, 216, 184, 100, 26)) { ecuSetEnabled(!ecuEnabled()); sysButtons(); savePrefs(); return true; }
+  return false;
+}
+static void sysLeave() {}
+
+// ============================================================
+//  PAGE 7 : ALERT SETTINGS  (ตั้งค่าแจ้งเตือนอุณหภูมิเครื่องยนต์สูง + แจ้งเตือนเปลี่ยนเกียร์)
+//  เข้าจาก SYS > ALERT SETTINGS ; แจ้งเตือนแสดงที่หน้า HOME (แบนเนอร์กระพริบ) และแถบบนของหน้าอื่น
+// ============================================================
+static const int AL_Y[2] = {24, 102};          // 0 = อุณหภูมิ, 1 = เปลี่ยนเกียร์
+constexpr int AL_H = 74;
+static const int AL_BX[4] = {8, 58, 216, 266};
+static Field fAlVal[2], fAlNow;
+static uint32_t alNowT = 0;
+
+static void alertToggle(int sec) {
+  bool on = sec ? g_shiftOn : g_tempOn; int y = AL_Y[sec];
+  button(232, y + 6, 76, 22, on ? "ON" : "OFF", C_TXT, on ? dimc(C_GREEN, 2) : C_PANEL, on ? C_GREEN : C_EDGE);
+}
+static void alertValue(int sec) {
+  char b[12]; bool on = sec ? g_shiftOn : g_tempOn;
+  if (sec) snprintf(b, sizeof b, "%u", (unsigned)g_shiftRpm); else snprintf(b, sizeof b, "%u", (unsigned)g_tempC);
+  fAlVal[sec].draw(b, on ? (sec ? K_YEL : K_RED) : C_DIM);
+}
+static void alertSection(int sec) {
+  static const char* LB[2][4] = {{"-5", "-1", "+1", "+5"}, {"-500", "-100", "+100", "+500"}};
+  int y = AL_Y[sec]; uint16_t acc = sec ? K_YEL : K_RED;
+  chamfer2(4, y, 312, AL_H, 8, acc);
+  txt(14, y + 17, sec ? "SHIFT ALERT (RPM)" : "HIGH TEMP ALERT (C)", 2, C_TXT, N_BG, ML_DATUM);
+  for (int i = 0; i < 4; i++) button(AL_BX[i], y + 34, 46, 34, LB[sec][i], C_TXT, C_PANEL, acc);
+  fAlVal[sec].set(160, y + 51, 100, 4, MC_DATUM, N_BG);
+  alertToggle(sec); fAlVal[sec].reset(); alertValue(sec);
+}
+static void alertEnter() {
+  tft.fillScreen(N_BG);
+  for (int x = 0; x < SCREEN_W; x++) tft.drawPixel(x, 20, dimc(lerpc(C_CYAN, C_PURP, x / (float)SCREEN_W), 1));
+  for (int x = 0; x < SCREEN_W; x++) tft.drawPixel(x, 21, dimc(lerpc(C_CYAN, C_PURP, x / (float)SCREEN_W), 3));
+  txt(160, 10, "ALERT SETTINGS", 2, C_TXT, N_BG, MC_DATUM);
+  alertSection(0); alertSection(1);
+  fAlNow.set(160, 185, 300, 1, MC_DATUM, N_BG); fAlNow.reset();
+  nButton(5, 194, 310, 38, "< BACK", C_TXT, N_PANEL, K_RED);
+  alNowT = 0;
+}
+static void alertUpdate(uint32_t now) {            // แสดงค่าสดไว้ช่วยตัดสินใจตั้งค่า
+  if (now - alNowT < 250) return;
+  alNowT = now;
+  char b[40];
+  if (ST == ECU_ONLINE || ST == ECU_DEMO) snprintf(b, sizeof b, "NOW  ECT %.0f C   RPM %u", D.eotC, D.rpm);
+  else snprintf(b, sizeof b, "NOW  --");
+  fAlNow.draw(b, C_DIM);
+}
+static bool alertTap(int x, int y) {
+  if (hit(x, y, 5, 194, 310, 38)) { gotoPage(P_SYS); return true; }
+  for (int sec = 0; sec < 2; sec++) {
+    int y0 = AL_Y[sec];
+    if (hit(x, y, 232, y0 + 4, 80, 26)) {
+      if (sec) g_shiftOn = !g_shiftOn; else g_tempOn = !g_tempOn;
+      alertToggle(sec); alertValue(sec); savePrefs(); return true;
+    }
+    if (y >= y0 + 34 && y < y0 + 68) {
+      static const int STEP[2][4] = {{-5, -1, 1, 5}, {-500, -100, 100, 500}};
+      for (int i = 0; i < 4; i++) {
+        if (x < AL_BX[i] || x >= AL_BX[i] + 46) continue;
+        if (sec) g_shiftRpm = (uint16_t)constrain((int)g_shiftRpm + STEP[1][i], SHIFT_ALERT_MIN, SHIFT_ALERT_MAX);
+        else     g_tempC    = (uint8_t)constrain((int)g_tempC + STEP[0][i], TEMP_ALERT_MIN, TEMP_ALERT_MAX);
+        alertValue(sec); savePrefs(); return true;
+      }
+    }
+  }
+  return false;
+}
+static void alertLeave() {}
+
+
+// ============================================================
+//  PAGE 8 : PHONE LINK  (เชื่อมแอปมือถือ iOS/Android ผ่าน Wi-Fi ของเกจ)
+//  เข้าจาก SYS > PHONE LINK ; มือถือเห็นหน้าจอเหมือนเกจ + ใช้เมนูได้ + ส่งความเร็ว GPS มาที่ช่อง SPEED
+// ============================================================
+static Field fPh[2];
+static uint32_t phT = 0;
+static void phoneToggle() {
+  bool on = mobileEnabled();
+  button(232, 24, 76, 22, on ? "ON" : "OFF", C_TXT, on ? dimc(C_GREEN, 2) : C_PANEL, on ? C_GREEN : C_EDGE);
+}
+static void phoneSrc() {
+  static const char* L[3] = {"AUTO", "ECU", "PHONE"};
+  for (int i = 0; i < 3; i++) {
+    bool on = g_spdSrc == i;
+    button(100 + i * 72, 128, 68, 24, L[i], C_TXT, on ? dimc(C_GREEN, 2) : C_PANEL, on ? C_GREEN : C_EDGE);
+  }
+}
+static void phoneEnter() {
+  tft.fillScreen(N_BG);
+  for (int x = 0; x < SCREEN_W; x++) tft.drawPixel(x, 20, dimc(lerpc(C_CYAN, C_PURP, x / (float)SCREEN_W), 1));
+  for (int x = 0; x < SCREEN_W; x++) tft.drawPixel(x, 21, dimc(lerpc(C_CYAN, C_PURP, x / (float)SCREEN_W), 3));
+  txt(160, 10, "PHONE LINK", 2, C_TXT, N_BG, MC_DATUM);
+  txt(8, 36, "WI-FI", 2, C_DIM, N_BG, ML_DATUM);   phoneToggle();
+  txt(8, 60, "NAME", 2, C_DIM, N_BG, ML_DATUM);    txt(312, 60, MOBILE_SSID, 2, C_TXT, N_BG, MR_DATUM);
+  txt(8, 78, "PASS", 2, C_DIM, N_BG, ML_DATUM);    txt(312, 78, MOBILE_PASS, 2, C_TXT, N_BG, MR_DATUM);
+  txt(8, 96, "OPEN", 2, C_DIM, N_BG, ML_DATUM);    txt(312, 96, "192.168.4.1", 2, C_TXT, N_BG, MR_DATUM);
+  txt(8, 114, "PHONES", 2, C_DIM, N_BG, ML_DATUM); fPh[0].set(312, 114, 110, 2, MR_DATUM, N_BG);
+  txt(8, 140, "SPEED", 2, C_DIM, N_BG, ML_DATUM);  phoneSrc();
+  txt(8, 166, "GPS SPEED", 2, C_DIM, N_BG, ML_DATUM); fPh[1].set(312, 166, 120, 2, MR_DATUM, N_BG);
+  nButton(5, 194, 310, 38, "< BACK", C_TXT, N_PANEL, K_RED);
+  fPh[0].reset(); fPh[1].reset(); phT = 0;
+}
+static void phoneUpdate(uint32_t now) {
+  if (now - phT < 300) return;
+  phT = now;
+  char b[24];
+  if (!mobileEnabled()) fPh[0].draw("OFF", C_DIM);
+  else { snprintf(b, sizeof b, "%d", mobileClients()); fPh[0].draw(b, mobileClients() ? C_GREEN : C_DIM); }
+  float kmh;
+  if (mobileSpeed(kmh)) { snprintf(b, sizeof b, "%.0f km/h", kmh); fPh[1].draw(b, C_GREEN); }
+  else fPh[1].draw("--", C_DIM);
+}
+static bool phoneTap(int x, int y) {
+  if (hit(x, y, 5, 194, 310, 38)) { gotoPage(P_SYS); return true; }
+  if (hit(x, y, 228, 20, 84, 30)) { mobileSetEnabled(!mobileEnabled()); phoneToggle(); return true; }
+  if (y >= 126 && y < 154) {
+    for (int i = 0; i < 3; i++) if (x >= 100 + i * 72 && x < 100 + i * 72 + 68) { g_spdSrc = (uint8_t)i; phoneSrc(); savePrefs(); return true; }
+  }
+  return false;
+}
+static void phoneLeave() {}
+
+
+// ============================================================
+//  Page table / manager
+// ============================================================
+struct PageDef {
+  void (*enter)();
+  void (*update)(uint32_t);
+  bool (*tap)(int, int);
+  void (*leave)();
+  bool (*swipe)(int, int, int, int);   // dx, dy, x0, y0 -> true = หน้าจัดการเอง (เช่น เลื่อนตาราง)
+  bool fs;                             // เต็มจอ (ไม่มีแถบบน/แถบเมนูล่าง)
+};
+static const PageDef PAGES[NPAGES] = {
+  {homeEnter,  homeUpdate,  homeTap,  homeLeave,  nullptr, true},
+  {mapEnter,   mapUpdate,   mapTap,   mapLeave,   mapSwipe, true},
+  {plotEnter,  plotUpdate,  plotTap,  plotLeave,  nullptr, false},
+  {dataEnter,  dataUpdate,  dataTap,  dataLeave,  nullptr, false},
+  {dtcEnter,   dtcUpdate,   dtcTap,   dtcLeave,   nullptr, false},
+  {sysEnter,   sysUpdate,   sysTap,   sysLeave,   nullptr, false},
+  {menuEnter,  menuUpdate,  menuTap,  menuLeave,  nullptr, true},
+  {alertEnter, alertUpdate, alertTap, alertLeave, nullptr, true},
+  {phoneEnter, phoneUpdate, phoneTap, phoneLeave, nullptr, true},
+};
+
+static void gotoPage(int p) {
+  p = (p % NPAGES + NPAGES) % NPAGES;
+  if (p != g_page) mapPrevPage = g_page;
+  PAGES[g_page].leave();
+  g_page = p;
+  if (!PAGES[g_page].fs) { topStatic(); navDraw(); }
+  PAGES[g_page].enter();
+  savePrefs();
+}
+
+void uiForceRedraw() {             // วาดหน้าปัจจุบันซ้ำทั้งหน้า (มือถือเพิ่งต่อ -> ต้องได้ภาพเต็มโดยไม่ต้องเปลี่ยนหน้า)
+  if (!PAGES[g_page].fs) { topStatic(); navDraw(); }
+  PAGES[g_page].enter();
+}
+
+static void langApply() {          // เปลี่ยนภาษาแล้ววาดหน้าปัจจุบันใหม่ทั้งหน้า
+  savePrefs();
+  if (!PAGES[g_page].fs) { topStatic(); navDraw(); }
+  PAGES[g_page].enter();
+}
+
+void uiSwipe(int dx, int dy, int x0, int y0) {
+  if (PAGES[g_page].swipe && PAGES[g_page].swipe(dx, dy, x0, y0)) return;
+  if (abs(dx) <= abs(dy)) return;
+  if (!PAGES[g_page].fs && y0 >= NAV_Y) return;
+  if (g_page == P_ALERT || g_page == P_PHONE) { gotoPage(P_SYS); return; }
+  if (g_page >= NAVN) { gotoPage(P_HOME); return; }
+  gotoPage((g_page + (dx < 0 ? 1 : NAVN - 1)) % NAVN);
+}
+
+void uiTap(int x, int y) {
+  if (!PAGES[g_page].fs && y >= NAV_Y) {
+    int i = x * NAVN / SCREEN_W;
+    if (i != g_page) gotoPage(i);
+    return;
+  }
+  if (PAGES[g_page].fs || y >= CT) PAGES[g_page].tap(x, y);
+}
+
+// ============================================================
+//  Splash  (หน้าบูต / รีบูต)  :  NUI ssk Remap
+// ============================================================
+static void splash() {
+  tft.fillScreen(C_BG);
+  char b[40];
+#if SPLASH_USE_POSTER
+  // โปสเตอร์ "ช่างแชน By เจ้าเตยผักสด" (แปลงจากภาพ -> RGB565 เต็มจอ เก็บใน flash)
+  tft.setSwapBytes(true);
+  // ภาพกว้าง SPLASH_IMG_W (อาจกว้างกว่าจอ 320) -> วางกึ่งกลาง ตัดส่วนเกินซ้าย/ขวา วาดทีละแถว
+  {
+    const int ox = (SPLASH_IMG_W - SCREEN_W) / 2;          // พิกเซลที่ล้นข้างละเท่าไร (>=0)
+    const int dw = SPLASH_IMG_W < SCREEN_W ? SPLASH_IMG_W : SCREEN_W;
+    const int dx = SPLASH_IMG_W < SCREEN_W ? (SCREEN_W - SPLASH_IMG_W) / 2 : 0;
+    const int sx = ox > 0 ? ox : 0;
+    for (int y = 0; y < SPLASH_IMG_H && y < SCREEN_H; y++)
+      tft.pushImage(dx, y, dw, 1, SPLASH_IMG + (uint32_t)y * SPLASH_IMG_W + sx);
+  }
+  tft.setSwapBytes(false);
+  // สถานะตาราง AFR: ป้ายเล็กมุมซ้ายบน (ทับเฉพาะท้องฟ้า ไม่ทับตัวหนังสือบนภาพ)
+  if (mapReady()) snprintf(b, sizeof b, "AFR MAP %lu", (unsigned long)mapCells());
+  else snprintf(b, sizeof b, "AFR MAP --");
+  tft.fillRect(0, 0, 86, 11, C_BG);
+  txt(43, 6, b, 1, N_LBLUE, C_BG, MC_DATUM);
+#else
+  // โลโก้ NUI Remap (แปลงจากภาพ -> RGB565 เก็บใน flash)
+  const int lx = (SCREEN_W - SPLASH_LOGO_W) / 2;
+  tft.setSwapBytes(true);
+  tft.pushImage(lx, 0, SPLASH_LOGO_W, SPLASH_LOGO_H, SPLASH_LOGO);
+  tft.setSwapBytes(false);
+  // ภาพเต็มจอ 240px สูง -> ป้ายสถานะ AFR ไว้มุมซ้ายบน (ไม่ตกขอบจอ)
+  if (mapReady()) snprintf(b, sizeof b, "AFR MAP %lu", (unsigned long)mapCells());
+  else snprintf(b, sizeof b, "AFR MAP --");
+  tft.fillRect(0, 0, 86, 11, C_BG);
+  txt(43, 6, b, 1, N_LBLUE, C_BG, MC_DATUM);
+#endif
+  // ค่อย ๆ สว่างขึ้น แล้วค้างไว้ครู่หนึ่ง
+  const uint32_t t0 = millis();
+  for (;;) {
+    uint32_t e = millis() - t0;
+    if (e >= 400) break;
+    ledcWrite(0, (uint32_t)g_bri * e / 400);
+    delay(8);
+  }
+  ledcWrite(0, g_bri);
+  delay(1800);
+}
+
+// ============================================================
+//  Begin / Loop
+// ============================================================
+void uiBegin() {
+  prefs.begin("gauge", false);
+  g_bri = prefs.getUChar("bri", 200);
+  int savedPage = prefs.getUChar("pg2", 0);
+  bool demo = prefs.getBool("demo", false);
+  bool en = prefs.getBool("ecu", true);
+  g_tempOn   = prefs.getBool("tOn", true);
+  g_tempC    = (uint8_t)constrain((int)prefs.getUChar("tC", 110), TEMP_ALERT_MIN, TEMP_ALERT_MAX);
+  g_shiftOn  = prefs.getBool("sOn", true);
+  g_shiftRpm = (uint16_t)constrain((int)prefs.getUShort("sR", 9000), SHIFT_ALERT_MIN, SHIFT_ALERT_MAX);
+  g_spdSrc = (uint8_t)constrain((int)prefs.getUChar("spd", 0), 0, 2);
+  g_mapRec = prefs.getBool("rec", true);       // บันทึกตาราง AFR อัตโนมัติเมื่อมีข้อมูลจาก ECU
+
+  ledcSetup(0, 5000, 8);
+  ledcAttachPin(PIN_BL, 0);
+  ledcWrite(0, 0);
+
+  tft.init();
+  tft.setRotation(SCREEN_ROTATION);
+  tft.invertDisplay(SCREEN_INVERT ? true : false);   // กำหนดการกลับขั้วสีจอเอง (ทับค่าเริ่มต้นของไดรเวอร์)
+  tft.fillScreen(C_BG);
+  ledcWrite(0, 0);             // ให้ไฟจอดับไว้ก่อน แล้ว splash จะค่อย ๆ เปิดขึ้น
+  mapBegin();                  // จองหน่วยความจำ + โหลดตาราง AFR ที่เคยบันทึกไว้
+  splash();
+  g_lang = prefs.getUChar("lang", 0);          // โหลดภาษาหลัง splash (splash เป็นโลโก้อยู่แล้ว)
+
+  ecuSetDemo(demo);
+  ecuSetEnabled(en);
+
+  g_page = (savedPage >= 0 && savedPage < NAVN) ? savedPage : 0;
+  if (!PAGES[g_page].fs) { topStatic(); navDraw(); }
+  PAGES[g_page].enter();
+}
+
+void uiLoop(uint32_t now) {
+  static uint32_t last = 0;
+  static uint32_t lastSeq = 0;
+  if (now - last < FRAME_MS) return;
+  float dt = (now - last) / 1000.0f;
+  if (dt > 0.2f) dt = 0.2f;
+  last = now;
+
+  ecuGet(D);
+  ST = ecuState();
+  {                                                            // ความเร็ว: GPS จากมือถือ (ถ้าต่ออยู่และสด) ไม่งั้นใช้ค่าจาก ECU
+    float kmh = 0; bool ph = mobileSpeed(kmh);
+    if (g_spdSrc == 2 || (g_spdSrc == 0 && ph)) { D.hasSpeed = ph; D.speed = ph ? kmh : 0; g_spdPhone = ph; }
+    else g_spdPhone = false;
+  }
+
+  // เลื่อนค่าให้ลื่น (exponential smoothing)
+  float aR = 1.0f - expf(-dt / 0.065f);
+  float aS = 1.0f - expf(-dt / 0.12f);
+  float aT = 1.0f - expf(-dt / 0.35f);
+  sRpm  += ((float)D.rpm - sRpm) * aR;
+  sTps  += (D.tps100 - sTps) * aS;
+  sAfr  += (D.afr - sAfr) * aS;
+  sEot  += (D.eotC - sEot) * aT;
+  sBatt += (D.batt - sBatt) * aT;
+  if (sRpm < 1.0f && D.rpm == 0) sRpm = 0;
+
+  // แจ้งเตือนอุณหภูมิสูง / เปลี่ยนเกียร์ (มี hysteresis กันกระพริบเปิด-ปิดรัว)
+  {
+    bool live = (ST == ECU_ONLINE || ST == ECU_DEMO);
+    g_tempAct  = g_tempOn  && live && (g_tempAct  ? D.eotC >= (float)g_tempC - 2.0f : D.eotC >= (float)g_tempC);
+    g_shiftAct = g_shiftOn && live && (g_shiftAct ? sRpm >= (float)g_shiftRpm - 300.0f : sRpm >= (float)g_shiftRpm);
+  }
+
+  if (now - histT >= HIST_MS) { histT = now; histPush(); }
+
+  // บันทึกตาราง MAP ตามอัตราข้อมูลจริงของ ECU (ทำงานทุกหน้า ไม่ใช่เฉพาะหน้า MAP)
+  if (D.seq != lastSeq) {
+    lastSeq = D.seq;
+    if (g_mapRec && (ST == ECU_ONLINE || ST == ECU_DEMO)) mapRecOk = mapRecord(D);
+  }
+
+  // บันทึกตาราง AFR ลง flash อัตโนมัติทุก 2 นาที ขณะกำลัง REC (กันข้อมูลหายตอนดับเครื่อง)
+  static uint32_t saveT = 0, savePts = 0;
+  if (g_mapRec && now - saveT > 120000) {
+    saveT = now;
+    if (mapPoints() != savePts) { savePts = mapPoints(); mapSave(); }
+  }
+
+  static uint32_t dtcT = 0;
+  if (now - dtcT > 400) {
+    dtcT = now;
+    DtcInfo di; ecuGetDtc(di);
+    curDtcCount = di.valid ? di.cur.count : 0;
+  }
+
+  if (!PAGES[g_page].fs) topUpdate(now);
+  PAGES[g_page].update(now);
+}
